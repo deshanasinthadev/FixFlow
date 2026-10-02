@@ -1,5 +1,6 @@
 "use client";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+import Papa from "papaparse";
 import { useApp } from "@/lib/store";
 import { Badge, SectionTitle, Field, Progress, Empty } from "./ui";
 import { fmtRs, num, timeAgo } from "@/lib/utils";
@@ -83,11 +84,60 @@ export function Settings() {
 }
 
 export function Backup() {
-  const { toast } = useApp();
+  const { toast, save, refresh } = useApp();
+  const [entity, setEntity] = useState("customers");
+  const [importing, setImporting] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const entities = ["users", "customers", "devices", "repairs", "repairParts", "repairActivity", "quotations", "products", "stockMovements", "suppliers", "purchases", "invoices", "payments", "expenses", "warranties", "warrantyClaims", "returns", "messages", "notifications", "auditLogs"];
+
+  const importCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setImporting(true);
+    try {
+      const parsed = await new Promise<Papa.ParseResult<Record<string, unknown>>>((resolve, reject) => {
+        Papa.parse<Record<string, unknown>>(file, {
+          header: true,
+          skipEmptyLines: "greedy",
+          dynamicTyping: true,
+          transformHeader: (header) => header.trim().replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()),
+          complete: resolve,
+          error: reject,
+        });
+      });
+      if (parsed.errors.length) throw new Error(parsed.errors[0].message);
+      if (!parsed.meta.fields?.length) throw new Error("CSV must include a header row");
+
+      const records = parsed.data
+        .map((row) => Object.fromEntries(Object.entries(row).filter(([key, value]) => key && key !== "id" && value !== "" && value != null)))
+        .filter((record) => Object.keys(record).length > 0);
+      if (!records.length) throw new Error("CSV contains no records to import");
+
+      let imported = 0;
+      for (const record of records) {
+        if (await save(entity, record)) imported++;
+      }
+      await refresh(entity);
+      toast(`Imported ${imported} of ${records.length} ${entity} records${imported < records.length ? " — some rows failed" : ""}`, imported === records.length ? "ok" : "error");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "CSV import failed", "error");
+    } finally {
+      setImporting(false);
+      event.target.value = "";
+    }
+  };
+
   return (
     <div className="grid md:grid-cols-2 gap-4 max-w-[900px]">
       <div className="card p-5"><h3 className="font-bold text-white">💾 Database Backup</h3><p className="text-[13px] text-slate-400 mt-1">Last backup: today 06:00 • Auto-backup: <span className="text-green-400 font-bold">Enabled (daily)</span></p>
-        <div className="flex gap-2 mt-3"><button className="btn-primary" onClick={() => toast("Backup started — download ready soon")}>Backup Now</button><button className="btn-ghost" onClick={() => toast("Export queued (CSV + JSON)")}>Export Data</button><button className="btn-ghost" onClick={() => toast("Choose a .csv file to import")}>Import</button></div></div>
+        <div className="flex gap-2 mt-3 flex-wrap"><button className="btn-primary" onClick={() => toast("Backup started — download ready soon")}>Backup Now</button><button className="btn-ghost" onClick={() => toast("Export queued (CSV + JSON)")}>Export Data</button>
+          <select className="input !w-auto" value={entity} onChange={(event) => setEntity(event.target.value)} aria-label="Import CSV into">
+            {entities.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+          <input ref={fileInput} className="hidden" type="file" accept=".csv,text/csv" onChange={importCsv} />
+          <button className="btn-ghost" disabled={importing} onClick={() => fileInput.current?.click()}>{importing ? "Importing…" : "Import CSV"}</button>
+        </div></div>
       <div className="card p-5"><h3 className="font-bold text-white mb-2">Backup History</h3>{["02 Oct 2026 — 06:00 — 4.2 MB ✓", "01 Oct 2026 — 06:00 — 4.1 MB ✓", "30 Sep 2026 — 06:00 — 4.0 MB ✓"].map((b) => <div key={b} className="text-[13px] text-slate-300 py-1.5 border-b border-white/5">{b}</div>)}
         <div className="mt-3 p-3 rounded-xl text-[12px] text-red-200" style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.25)" }}>⚠️ Destructive actions (purge / restore) require confirmation and Admin PIN.</div></div>
     </div>
