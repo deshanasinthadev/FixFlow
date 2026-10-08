@@ -1,5 +1,10 @@
 {
+  "title": "FixFlow — Smart Repair Management & POS",
   "description": "Streamline repair management and point-of-sale operations for electronics businesses with a comprehensive platform that enhances efficiency and customer experience.",
+  "language": "en",
+  "icons": {
+    "icon": "/favicon.svg"
+  },
   "robots": {
     "index": false
   },
