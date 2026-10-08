@@ -52,12 +52,20 @@ export function useDb(): Store {
  * Deliberately tiny — swap for TanStack Query later if caching gets hairy.
  */
 export function useQuery<T>(load: (db: Db) => Promise<T>, deps: unknown[] = []) {
-  const { db: database, ready, version } = useDb()
+  const { db: database, ready, version, error: storeError } = useDb()
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    // If the database never opens (IndexedDB blocked in a sandboxed iframe,
+    // private browsing, quota exceeded) the query would otherwise spin on
+    // "Loading…" forever with no explanation. Fail loudly instead.
+    if (storeError) {
+      setError(storeError)
+      setLoading(false)
+      return
+    }
     if (!ready) return
     let cancelled = false
     setLoading(true)
@@ -78,7 +86,7 @@ export function useQuery<T>(load: (db: Db) => Promise<T>, deps: unknown[] = []) 
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, version, ...deps])
+  }, [ready, storeError, version, ...deps])
 
   return { data, loading, error }
 }
