@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
 type User = {
@@ -88,11 +88,11 @@ const adminNav = [
 ] as const;
 
 const repairs = [
-  { id: "FX-2026-004821", customerId: "cust-1", technicianId: "tech-1", branchId: "colombo", customer: "Nimal Perera", device: "Dell Latitude 5420", tech: "John Silva", priority: "High", status: "In Progress", amount: "Rs. 18,500", eta: "Today, 4:30 PM" },
-  { id: "FX-2026-004820", customerId: "cust-2", technicianId: "tech-2", branchId: "colombo", customer: "Amaya Fernando", device: "iPhone 13", tech: "K. Silva", priority: "Normal", status: "Testing", amount: "Rs. 42,000", eta: "Today, 2:00 PM" },
-  { id: "FX-2026-004819", customerId: "cust-3", technicianId: "tech-1", branchId: "colombo", customer: "Kasun Silva", device: "HP Victus 15", tech: "John Silva", priority: "Urgent", status: "Awaiting Parts", amount: "Rs. 12,800", eta: "Tomorrow" },
-  { id: "FX-2026-004818", customerId: "cust-4", technicianId: "tech-3", branchId: "colombo", customer: "Tharindu Jayasinghe", device: "Samsung Galaxy S23", tech: "A. Perera", priority: "Normal", status: "Ready for Pickup", amount: "Rs. 28,500", eta: "Ready now" },
-  { id: "FX-2026-004817", customerId: "cust-5", technicianId: "tech-2", branchId: "kandy", customer: "Ruwani Dias", device: "Lenovo ThinkPad T14", tech: "K. Silva", priority: "Low", status: "Diagnosing", amount: "Rs. 6,500", eta: "Mar 22" },
+  { id: "FX-2026-004821", customerId: "cust-1", technicianId: "tech-1", branchId: "colombo", customer: "Nimal Perera", device: "Dell Latitude 5420", tech: "John Silva", priority: "High", status: "In Progress", amount: "Rs. 18,500", eta: "Today, 4:30 PM", serial: "DL5420-78X2", complaint: "Overheats and shuts down", accessories: "Charger, laptop bag" },
+  { id: "FX-2026-004820", customerId: "cust-2", technicianId: "tech-2", branchId: "colombo", customer: "Amaya Fernando", device: "iPhone 13", tech: "K. Silva", priority: "Normal", status: "Testing", amount: "Rs. 42,000", eta: "Today, 2:00 PM", serial: "IP13-DX9K2L", complaint: "Display cracked, touch unresponsive", accessories: "Device only" },
+  { id: "FX-2026-004819", customerId: "cust-3", technicianId: "tech-1", branchId: "colombo", customer: "Kasun Silva", device: "HP Victus 15", tech: "John Silva", priority: "Urgent", status: "Awaiting Parts", amount: "Rs. 12,800", eta: "Tomorrow", serial: "HPV15-4B77Q", complaint: "Cooling fan noisy, random shutdowns", accessories: "Charger" },
+  { id: "FX-2026-004818", customerId: "cust-4", technicianId: "tech-3", branchId: "colombo", customer: "Tharindu Jayasinghe", device: "Samsung Galaxy S23", tech: "A. Perera", priority: "Normal", status: "Ready for Pickup", amount: "Rs. 28,500", eta: "Ready now", serial: "SGS23-R4T88", complaint: "Battery drains within three hours", accessories: "Device, SIM tray tool" },
+  { id: "FX-2026-004817", customerId: "cust-5", technicianId: "tech-2", branchId: "kandy", customer: "Ruwani Dias", device: "Lenovo ThinkPad T14", tech: "K. Silva", priority: "Low", status: "Diagnosing", amount: "Rs. 6,500", eta: "Mar 22", serial: "LTT14-91M0P", complaint: "Keyboard keys sticking, trackpad jumpy", accessories: "Charger, docking station" },
 ];
 
 const roleNav: Record<Role, ReadonlyArray<{ label: string; items: ReadonlyArray<readonly [string, string]> }>> = {
@@ -125,17 +125,50 @@ function recordsFor(user: User) {
   return repairs.filter((r) => r.branchId === user.branchId);
 }
 
-const products = [
-  { name: "65W Laptop Charger", sku: "CHR-65W-001", price: 6500, stock: 14, icon: "laptop" as IconName, cat: "Chargers" },
-  { name: "USB-C Fast Cable", sku: "CBL-USC-014", price: 1850, stock: 32, icon: "transfer" as IconName, cat: "Cables" },
-  { name: "DDR4 8GB RAM", sku: "RAM-D4-8GB", price: 9200, stock: 8, icon: "box" as IconName, cat: "Spare Parts" },
-  { name: "512GB NVMe SSD", sku: "SSD-NV-512", price: 14500, stock: 11, icon: "package" as IconName, cat: "Spare Parts" },
-  { name: "iPhone 13 Display", sku: "DSP-IP13-O", price: 38500, stock: 3, icon: "phone" as IconName, cat: "Spare Parts" },
-  { name: "Premium Thermal Paste", sku: "SRV-THM-005", price: 2200, stock: 24, icon: "tool" as IconName, cat: "Services" },
+type Product = {
+  name: string;
+  sku: string;
+  price: number;
+  stock: number;
+  /** Units already promised to a repair or sale — not free to sell. */
+  reserved: number;
+  /** Re-order level: at or below this the item needs attention. */
+  min: number;
+  icon: IconName;
+  cat: string;
+};
+
+const products: Product[] = [
+  { name: "65W Laptop Charger", sku: "CHR-65W-001", price: 6500, stock: 14, reserved: 3, min: 16, icon: "laptop", cat: "Chargers" },
+  { name: "USB-C Fast Cable", sku: "CBL-USC-014", price: 1850, stock: 32, reserved: 6, min: 25, icon: "transfer", cat: "Cables" },
+  { name: "DDR4 8GB RAM", sku: "RAM-D4-8GB", price: 9200, stock: 8, reserved: 2, min: 10, icon: "box", cat: "Spare Parts" },
+  { name: "512GB NVMe SSD", sku: "SSD-NV-512", price: 14500, stock: 11, reserved: 1, min: 12, icon: "package", cat: "Spare Parts" },
+  { name: "iPhone 13 Display", sku: "DSP-IP13-O", price: 38500, stock: 3, reserved: 2, min: 6, icon: "phone", cat: "Spare Parts" },
+  { name: "Premium Thermal Paste", sku: "SRV-THM-005", price: 2200, stock: 24, reserved: 4, min: 20, icon: "tool", cat: "Services" },
 ];
 
-function Button({ children, kind = "primary", icon, onClick }: { children: React.ReactNode; kind?: "primary" | "secondary" | "ghost"; icon?: IconName; onClick?: () => void }) {
-  return <button className={`btn ${kind}`} onClick={onClick}>{icon && <Icon name={icon} size={16} />}<span>{children}</span></button>;
+type StockLevel = "ok" | "low" | "critical";
+
+/** Reorder level is half the minimum: at or under it the item is critical. */
+function stockLevel(product: Product): StockLevel {
+  if (product.stock <= product.min / 2) return "critical";
+  if (product.stock <= product.min) return "low";
+  return "ok";
+}
+
+/** On-hand stock minus reserved stock, never negative. */
+function availableStock(product: Product) {
+  return Math.max(0, product.stock - product.reserved);
+}
+
+const lowStock = products.filter((product) => stockLevel(product) !== "ok");
+const criticalStock = lowStock.filter((product) => stockLevel(product) === "critical");
+const reservedUnits = products.reduce((total, product) => total + product.reserved, 0);
+const stockValue = products.reduce((total, product) => total + product.price * product.stock, 0);
+const outOfStock = products.filter((product) => product.stock === 0).length;
+
+function Button({ children, kind = "primary", icon, onClick, type = "button" }: { children: React.ReactNode; kind?: "primary" | "secondary" | "ghost"; icon?: IconName; onClick?: () => void; type?: "button" | "submit" }) {
+  return <button type={type} className={`btn ${kind}`} onClick={onClick}>{icon && <Icon name={icon} size={16} />}<span>{children}</span></button>;
 }
 
 function Badge({ children, tone }: { children: React.ReactNode; tone?: string }) {
@@ -164,22 +197,28 @@ function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [cart, setCart] = useState<Record<string, number>>({ "USB-C Fast Cable": 2 });
   const [analyzed, setAnalyzed] = useState(false);
+  const [selectedRepair, setSelectedRepair] = useState<string | null>(null);
 
   const currentNav = user ? roleNav[user.role] : [];
   const navPages = useMemo(() => currentNav.flatMap((group) => group.items.map(([label]) => label)), [currentNav]);
   const extraPages = user?.role === "Admin" || user?.role === "Manager" ? ["Repair Details", "New Repair", "Profile"] : user?.role === "Technician" ? ["Repair Details", "Profile"] : user?.role === "Customer" ? ["My Repair Details", "Profile"] : ["Profile"];
   const allowedPages = [...navPages, ...extraPages];
   const scopedRepairs = user ? recordsFor(user) : [];
+  // Only ever resolve inside the records this role is allowed to see.
+  const activeRepair = scopedRepairs.find((repair) => repair.id === selectedRepair) ?? scopedRepairs[0];
 
   const routeFor = (to: string, activeUser = user) => {
     if (!activeUser) return "/login";
     const slug = to.toLowerCase().replaceAll(" ", "-");
     return `/${activeUser.role.toLowerCase()}/${slug}`;
   };
-  const navigate = (to: string) => {
+  const navigate = (to: string, recordId?: string) => {
     if (!user || ![...allowedPages, "Dashboard"].includes(to)) {
       to = "Dashboard";
     }
+    // Remember which record was opened so the detail pages stop showing a
+    // hardcoded repair regardless of the row that was clicked.
+    if (recordId) setSelectedRepair(recordId);
     setPage(to);
     setMobileNav(false);
     setProfileOpen(false);
@@ -214,6 +253,18 @@ function App() {
     window.addEventListener("popstate", guardBrowserRoute);
     return () => window.removeEventListener("popstate", guardBrowserRoute);
   }, [user, allowedPages.join("|")]);
+
+  const profileRef = useRef<HTMLDivElement>(null);
+
+  // Close the profile menu when the pointer goes down anywhere outside of it.
+  useEffect(() => {
+    if (!profileOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!profileRef.current?.contains(event.target as Node)) setProfileOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [profileOpen]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -269,8 +320,10 @@ function App() {
             {!isCustomer && <button className="branch-select"><span className="branch-icon"><Icon name="branch" size={15}/></span><span>{user.branch}</span>{user.role === "Admin" && <Icon name="chevron" size={13}/>}</button>}
             <button className="icon-btn theme-toggle" onClick={() => setDark(!dark)} title="Switch theme"><Icon name={dark ? "sun" : "moon"}/></button>
             <button className="icon-btn notification" onClick={() => navigate("Notifications")}><Icon name="bell"/><span/></button>
-            <button className="profile" onClick={() => setProfileOpen(!profileOpen)}><div className="avatar">{initials}</div><div><strong>{user.name}</strong><small>{user.role}</small></div><Icon name="chevron" size={13}/></button>
-            {profileOpen && <div className="profile-menu"><div className="profile-menu-head"><div className="avatar">{initials}</div><div><strong>{user.name}</strong><span>{user.email}</span><small>{user.role} · {user.branch}</small></div></div><button onClick={() => navigate("Profile")}><Icon name="team"/>Profile</button>{["Admin", "Manager"].includes(user.role) && <button onClick={() => navigate(user.role === "Admin" ? "Settings" : "Branch Operations")}><Icon name="settings"/>Settings</button>}<button className="logout" onClick={logout}><Icon name="arrow"/>Logout</button></div>}
+            <div className="profile-wrap" ref={profileRef}>
+              <button className="profile" onClick={() => setProfileOpen(!profileOpen)} aria-haspopup="menu" aria-expanded={profileOpen}><div className="avatar">{initials}</div><div><strong>{user.name}</strong><small>{user.role}</small></div><Icon name="chevron" size={13}/></button>
+              {profileOpen && <div className="profile-menu" role="menu"><div className="profile-menu-head"><div className="avatar">{initials}</div><div><strong>{user.name}</strong><span>{user.email}</span><small>{user.role} · {user.branch}</small></div></div><button role="menuitem" onClick={() => navigate("Profile")}><Icon name="team"/>Profile</button>{["Admin", "Manager"].includes(user.role) && <button role="menuitem" onClick={() => navigate(user.role === "Admin" ? "Settings" : "Branch Operations")}><Icon name="settings"/>Settings</button>}<button role="menuitem" className="logout" onClick={logout}><Icon name="arrow"/>Logout</button></div>}
+            </div>
           </div>
         </header>
 
@@ -287,8 +340,8 @@ function App() {
           {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
           {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
           {page === "New Repair" && <NewRepair navigate={navigate}/>}
-          {page === "Repair Details" && <RepairDetails technician={user.role === "Technician"}/>}
-          {page === "My Repair Details" && <CustomerRepairDetails data={scopedRepairs}/>}
+          {page === "Repair Details" && <RepairDetails technician={user.role === "Technician"} repair={activeRepair}/>}
+          {page === "My Repair Details" && <CustomerRepairDetails repair={activeRepair}/>}
           {page === "POS" && <POS cart={cart} setCart={setCart}/>}
           {page === "Inventory" && <Inventory/>}
           {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis analyzed={analyzed} setAnalyzed={setAnalyzed}/>}
@@ -314,9 +367,13 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
 
   const submitLogin = () => {
     setError("");
+    if (!email.trim() || !password) {
+      setError("Enter both your email address and password.");
+      return;
+    }
     setLoading(true);
     window.setTimeout(() => {
-      const account = Object.values(demoUsers).find((candidate) => candidate.email.toLowerCase() === email.toLowerCase());
+      const account = Object.values(demoUsers).find((candidate) => candidate.email.toLowerCase() === email.trim().toLowerCase());
       if (!account || password !== "Demo@123") {
         setError("Invalid email or password.");
         setLoading(false);
@@ -355,10 +412,12 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
         {mode === "login" && <>
           <div className="login-heading"><span>WELCOME BACK</span><h2>Sign in to FixFlow</h2><p>Enter your details or choose a demo workspace.</p></div>
           {error && <div className="login-error"><Icon name="alert"/><span><strong>Unable to sign in</strong>{error}</span></div>}
-          <label>Email address<div className="auth-input"><Icon name="users"/><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com"/></div></label>
-          <label>Password<div className="auth-input"><Icon name="shield"/><input type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password"/><button onClick={() => setShowPassword(!showPassword)}>{showPassword ? "Hide" : "Show"}</button></div></label>
-          <div className="login-options"><label className="check-label"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)}/><span>Remember me</span></label><button onClick={() => { setMode("forgot"); setError(""); }}>Forgot password?</button></div>
-          <Button onClick={submitLogin}>{loading ? <><span className="spinner"/>Signing in...</> : "Sign In"}</Button>
+          <form onSubmit={(event) => { event.preventDefault(); submitLogin(); }}>
+          <label>Email address<div className="auth-input"><Icon name="users"/><input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com"/></div></label>
+          <label>Password<div className="auth-input"><Icon name="shield"/><input type={showPassword ? "text" : "password"} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password"/><button type="button" onClick={() => setShowPassword(!showPassword)}>{showPassword ? "Hide" : "Show"}</button></div></label>
+          <div className="login-options"><label className="check-label"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)}/><span>Remember me</span></label><button type="button" onClick={() => { setMode("forgot"); setError(""); }}>Forgot password?</button></div>
+          <Button type="submit">{loading ? <><span className="spinner"/>Signing in...</> : "Sign In"}</Button>
+          </form>
           <div className="demo-divider"><span>Prototype demo accounts</span></div>
           <div className="demo-roles">{(Object.keys(demoUsers) as Role[]).map((role) => <button className={email === demoUsers[role].email ? "selected" : ""} onClick={() => selectDemo(role)} key={role}><span><Icon name={role === "Admin" ? "shield" : role === "Manager" ? "branch" : role === "Technician" ? "tool" : role === "Cashier" ? "cash" : "users"}/></span><strong>{role}</strong><small>{role === "Customer" ? "Portal" : role === "Technician" ? "Repairs" : role === "Cashier" ? "POS" : role === "Manager" ? "Branch" : "Full access"}</small></button>)}</div>
           <p className="demo-hint">Demo password: <strong>Demo@123</strong></p>
@@ -366,31 +425,35 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
         {mode === "forgot" && <>
           <button className="auth-back" onClick={() => setMode("login")}><Icon name="chevron" size={15}/> Back to sign in</button>
           <div className="login-heading"><div className="reset-icon"><Icon name="send"/></div><h2>Forgot your password?</h2><p>Enter your account email and we'll simulate sending a secure reset link.</p></div>
-          <label>Email address<div className="auth-input"><Icon name="users"/><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com"/></div></label>
-          <Button onClick={() => setMode("reset")}>Send reset link</Button>
+          <form onSubmit={(event) => { event.preventDefault(); setMode("reset"); }}>
+          <label>Email address<div className="auth-input"><Icon name="users"/><input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com"/></div></label>
+          <Button type="submit">Send reset link</Button>
+          </form>
         </>}
         {mode === "reset" && <>
           <button className="auth-back" onClick={() => setMode("forgot")}><Icon name="chevron" size={15}/> Back</button>
           <div className="login-heading"><div className="reset-icon"><Icon name="shield"/></div><h2>Create a new password</h2><p>Choose a secure password for {email || "your FixFlow account"}.</p></div>
           {error && <div className="login-error"><Icon name="alert"/><span>{error}</span></div>}
-          <label>New password<div className="auth-input"><Icon name="shield"/><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters"/></div></label>
-          <label>Confirm password<div className="auth-input"><Icon name="shield"/><input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter password again"/></div></label>
-          <Button onClick={resetPassword}>Reset password</Button>
+          <form onSubmit={(event) => { event.preventDefault(); resetPassword(); }}>
+          <label>New password<div className="auth-input"><Icon name="shield"/><input type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters"/></div></label>
+          <label>Confirm password<div className="auth-input"><Icon name="shield"/><input type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter password again"/></div></label>
+          <Button type="submit">Reset password</Button>
+          </form>
         </>}
-        {mode === "success" && <div className="reset-success"><div className="success-mark"><Icon name="check" size={27}/></div><h2>Password reset successfully</h2><p>Your prototype password has been updated. You can now return to the login screen.</p><Button onClick={() => { setMode("login"); setPassword(""); setConfirmPassword(""); }}>Return to Login</Button></div>}
+        {mode === "success" && <div className="reset-success"><div className="success-mark"><Icon name="check" size={27}/></div><h2>Password reset link sent</h2><p>This is a prototype, so no password is actually changed. Sign in with the demo password <strong>Demo@123</strong> to continue.</p><Button onClick={() => { setMode("login"); setPassword(""); setConfirmPassword(""); }}>Return to Login</Button></div>}
       </Card>
       <p className="auth-footer">Prototype environment · Protected by role-based access control</p>
     </div>
   </div>;
 }
 
-function Dashboard({ navigate, data }: { navigate: (p: string) => void; data: typeof repairs }) {
+function Dashboard({ navigate, data }: { navigate: (p: string, id?: string) => void; data: typeof repairs }) {
   const kpis = [
     ["Today's Sales", "Rs. 184,500", "+12.4%", "sale", "blue"],
     ["Active Repairs", "38", "+6 today", "tool", "purple"],
     ["Ready for Pickup", "12", "Rs. 146K value", "check", "cyan"],
     ["Outstanding", "Rs. 326,400", "18 invoices", "wallet", "pink"],
-    ["Low Stock Items", "8", "3 critical", "alert", "amber"],
+    ["Low Stock Items", String(lowStock.length), `${criticalStock.length} critical`, "alert", "amber"],
     ["Today's Expenses", "Rs. 24,800", "−8.2%", "receipt", "slate"],
   ] as const;
   return <>
@@ -431,19 +494,19 @@ function Dashboard({ navigate, data }: { navigate: (p: string) => void; data: ty
         <RepairTable compact navigate={navigate} data={data}/>
       </Card>
       <Card className="stock-card">
-        <div className="card-head"><div><h2>Low stock</h2><p>Items needing attention</p></div><span className="count-badge">8</span></div>
-        {products.slice(0,4).map((p, i) => <div className="stock-row" key={p.name}><div className="product-mini"><Icon name={p.icon}/></div><div><strong>{p.name}</strong><span>{p.sku}</span></div><div><strong className={i < 2 ? "danger-text" : ""}>{i + 2} left</strong><span>Min. {i+5}</span></div></div>)}
+        <div className="card-head"><div><h2>Low stock</h2><p>Items needing attention</p></div><span className="count-badge">{lowStock.length}</span></div>
+        {lowStock.map((p) => <div className="stock-row" key={p.name}><div className="product-mini"><Icon name={p.icon}/></div><div><strong>{p.name}</strong><span>{p.sku}</span></div><div><strong className={stockLevel(p) === "critical" ? "danger-text" : ""}>{p.stock} left</strong><span>Min. {p.min}</span></div></div>)}
         <Button kind="secondary" onClick={() => navigate("Inventory")}>Open inventory</Button>
       </Card>
     </div>
   </>;
 }
 
-function RoleDashboard({ user, data, navigate }: { user: User; data: typeof repairs; navigate: (page: string) => void }) {
+function RoleDashboard({ user, data, navigate }: { user: User; data: typeof repairs; navigate: (page: string, id?: string) => void }) {
   if (user.role === "Customer") {
     const repair = data[0];
     return <div className="customer-dashboard">
-      <Card className="customer-status-hero"><div className="customer-status-copy"><span className="portal-kicker">ACTIVE REPAIR</span><div><h2>{repair?.device || "No active repairs"}</h2>{repair && <Badge>{repair.status}</Badge>}</div><p>{repair?.id} · Estimated completion {repair?.eta}</p><Button onClick={() => navigate("My Repair Details")}>View repair details <Icon name="arrow" size={15}/></Button></div><div className="status-device"><Icon name="laptop" size={42}/><span>Repair in progress</span></div></Card>
+      <Card className="customer-status-hero"><div className="customer-status-copy"><span className="portal-kicker">ACTIVE REPAIR</span><div><h2>{repair?.device || "No active repairs"}</h2>{repair && <Badge>{repair.status}</Badge>}</div><p>{repair?.id} · Estimated completion {repair?.eta}</p><Button onClick={() => navigate("My Repair Details", repair?.id)}>View repair details <Icon name="arrow" size={15}/></Button></div><div className="status-device"><Icon name="laptop" size={42}/><span>Repair in progress</span></div></Card>
       <div className="kpi-grid customer-kpis">
         {[
           ["My Active Repairs", String(data.length), "tool", "purple"],
@@ -490,7 +553,7 @@ function RoleDashboard({ user, data, navigate }: { user: User; data: typeof repa
     <div className="kpi-grid">{cards.map(([label, value, icon, tone, note]) => <Card className="kpi" key={label}><div className={`kpi-icon ${tone}`}><Icon name={icon}/></div><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div><div className="kpi-change positive">{note}</div></Card>)}</div>
     {user.role === "Technician" ? <Card className="table-card role-table"><div className="card-head table-title"><div><h2>My assigned repairs</h2><p>Only work assigned directly to your technician account.</p></div><Button kind="ghost" onClick={() => navigate("My Repairs")}>View workspace <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate} showFinancial={false}/></Card> :
       user.role === "Cashier" ? <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Recent branch transactions</h2><p>Payments processed at your register</p></div><Button kind="ghost" onClick={() => navigate("POS")}>Open POS <Icon name="arrow" size={14}/></Button></div><TransactionList/></Card><Card className="register-card"><div className="card-head"><div><h2>Cash register</h2><p>Register #CR-CO3-04</p></div><Badge tone="in-stock">Open</Badge></div><div className="register-total"><span>Expected cash</span><strong>Rs. 92,500</strong><small>Opening float Rs. 15,000</small></div><Button kind="secondary" onClick={() => navigate("Cash Register")}>View register</Button></Card></div> :
-      <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Branch repair activity</h2><p>Authorized Colombo 03 records only</p></div><Button kind="ghost" onClick={() => navigate("Repairs")}>View all <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate}/></Card><Card className="stock-card"><div className="card-head"><div><h2>Branch alerts</h2><p>Items needing attention</p></div><span className="count-badge">6</span></div>{products.slice(0,4).map((product, index) => <div className="stock-row" key={product.name}><div className="product-mini"><Icon name={product.icon}/></div><div><strong>{product.name}</strong><span>{product.sku}</span></div><div><strong className={index < 2 ? "danger-text" : ""}>{index + 2} left</strong><span>Colombo 03</span></div></div>)}</Card></div>}
+      <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Branch repair activity</h2><p>Authorized Colombo 03 records only</p></div><Button kind="ghost" onClick={() => navigate("Repairs")}>View all <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate}/></Card><Card className="stock-card"><div className="card-head"><div><h2>Branch alerts</h2><p>Items needing attention</p></div><span className="count-badge">{lowStock.length}</span></div>{lowStock.map((product) => <div className="stock-row" key={product.name}><div className="product-mini"><Icon name={product.icon}/></div><div><strong>{product.name}</strong><span>{product.sku}</span></div><div><strong className={stockLevel(product) === "critical" ? "danger-text" : ""}>{product.stock} left</strong><span>Colombo 03</span></div></div>)}</Card></div>}
   </>;
 }
 
@@ -498,17 +561,16 @@ function TransactionList() {
   return <div className="transaction-list">{[["INV-2026-1024","Nimal Perera","Cash","Rs. 18,500"],["POS-2026-8842","Walk-in customer","Card","Rs. 6,500"],["INV-2026-1021","Amaya Fernando","Bank","Rs. 42,000"]].map(([id, customer, method, amount]) => <div key={id}><div className="product-mini"><Icon name="receipt"/></div><div><strong>{id}</strong><span>{customer} · {method}</span></div><strong>{amount}</strong></div>)}</div>;
 }
 
-function CustomerRepairs({ data, navigate }: { data: typeof repairs; navigate: (page: string) => void }) {
-  return <div className="portal-repairs">{data.map((repair) => <Card className="portal-repair-card" key={repair.id}><div className="device-icon"><Icon name="laptop" size={24}/></div><div className="portal-repair-main"><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Estimated completion: {repair.eta}</p></div><Button kind="secondary" onClick={() => navigate("My Repair Details")}>Track repair</Button></Card>)}</div>;
+function CustomerRepairs({ data, navigate }: { data: typeof repairs; navigate: (page: string, id?: string) => void }) {
+  return <div className="portal-repairs">{data.map((repair) => <Card className="portal-repair-card" key={repair.id}><div className="device-icon"><Icon name="laptop" size={24}/></div><div className="portal-repair-main"><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Estimated completion: {repair.eta}</p></div><Button kind="secondary" onClick={() => navigate("My Repair Details", repair.id)}>Track repair</Button></Card>)}</div>;
 }
 
-function CustomerRepairDetails({ data }: { data: typeof repairs }) {
-  const repair = data[0];
+function CustomerRepairDetails({ repair }: { repair: (typeof repairs)[number] | undefined }) {
   if (!repair) return <Card className="empty-module"><Icon name="tool" size={32}/><h2>No repair found</h2><p>This account has no active repair records.</p></Card>;
-  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Your repair · Colombo 03</p></div></div><div className="repair-facts"><div><span>Estimated completion</span><strong>{repair.eta}</strong></div><div><span>Approved estimate</span><strong>{repair.amount}</strong></div></div></Card><div className="customer-detail-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Your repair journey</h2><p>Simple, customer-friendly progress updates.</p></div></div><div className="portal-progress horizontal">{["Received","Diagnosing","Repairing","Testing","Ready","Delivered"].map((item,index)=><div className={index<3?"complete":index===3?"current":""} key={item}><span>{index<3?<Icon name="check" size={14}/>:index+1}</span><strong>{item}</strong></div>)}</div><div className="customer-update"><Icon name="bell"/><div><strong>Your repair is progressing</strong><p>Our team has completed the repair work. Your device will now move to quality testing.</p><span>Updated today at 11:42 AM</span></div></div></Card><Card className="portal-actions"><h2>Repair summary</h2><div className="info-list"><div><span>Issue reported</span><strong>Overheats and shuts down</strong></div><div><span>Approved work</span><strong>Cooling service and thermal compound replacement</strong></div><div><span>Payment status</span><strong>Payment due on pickup</strong></div><div><span>Warranty</span><strong>90 days after delivery</strong></div></div><Button>Contact support</Button></Card></div></>;
+  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Your repair · {repair.branchId === "kandy" ? "Kandy" : "Colombo 03"}</p></div></div><div className="repair-facts"><div><span>Estimated completion</span><strong>{repair.eta}</strong></div><div><span>Approved estimate</span><strong>{repair.amount}</strong></div></div></Card><div className="customer-detail-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Your repair journey</h2><p>Simple, customer-friendly progress updates.</p></div></div><div className="portal-progress horizontal">{["Received","Diagnosing","Repairing","Testing","Ready","Delivered"].map((item,index)=><div className={index<3?"complete":index===3?"current":""} key={item}><span>{index<3?<Icon name="check" size={14}/>:index+1}</span><strong>{item}</strong></div>)}</div><div className="customer-update"><Icon name="bell"/><div><strong>Your repair is progressing</strong><p>Our team has completed the repair work. Your device will now move to quality testing.</p><span>Updated today at 11:42 AM</span></div></div></Card><Card className="portal-actions"><h2>Repair summary</h2><div className="info-list"><div><span>Issue reported</span><strong>{repair.complaint}</strong></div><div><span>Device serial</span><strong>{repair.serial}</strong></div><div><span>Payment status</span><strong>Payment due on pickup</strong></div><div><span>Warranty</span><strong>90 days after delivery</strong></div></div><Button>Contact support</Button></Card></div></>;
 }
 
-function Repairs({ navigate, data, technician = false }: { navigate: (p: string) => void; data: typeof repairs; technician?: boolean }) {
+function Repairs({ navigate, data, technician = false }: { navigate: (p: string, id?: string) => void; data: typeof repairs; technician?: boolean }) {
   return <>
     <Card className="filter-card">
       <div className="filter-search"><Icon name="search"/><input placeholder="Search repair ID, customer or device..."/></div>
@@ -519,9 +581,9 @@ function Repairs({ navigate, data, technician = false }: { navigate: (p: string)
   </>;
 }
 
-function RepairTable({ compact = false, navigate, data, showFinancial = true }: { compact?: boolean; navigate: (p: string) => void; data: typeof repairs; showFinancial?: boolean }) {
+function RepairTable({ compact = false, navigate, data, showFinancial = true }: { compact?: boolean; navigate: (p: string, id?: string) => void; data: typeof repairs; showFinancial?: boolean }) {
   return <div className="table-wrap"><table><thead><tr><th>Repair</th><th>Customer & device</th>{!compact && <th>Technician</th>}<th>Status</th>{!compact && <th>Priority</th>}<th>{compact || !showFinancial ? "Due" : "Amount"}</th><th/></tr></thead>
-    <tbody>{data.slice(0, compact ? 4 : 5).map(r => <tr key={r.id} onClick={() => navigate("Repair Details")}>
+    <tbody>{data.slice(0, compact ? 4 : 5).map(r => <tr key={r.id} onClick={() => navigate("Repair Details", r.id)}>
       <td><strong className="id-link">{r.id}</strong><span className="mobile-only">{r.customer}</span></td>
       <td><strong>{r.customer}</strong><span>{r.device}</span></td>{!compact && <td><div className="tech"><span>{r.tech.split(" ").map(x=>x[0]).join("")}</span>{r.tech}</div></td>}
       <td><Badge>{r.status}</Badge></td>{!compact && <td><span className={`priority ${r.priority.toLowerCase()}`}>{r.priority}</span></td>}<td><strong>{compact ? r.eta : showFinancial ? r.amount : r.eta}</strong>{!compact && showFinancial && <span>{r.eta}</span>}</td><td><button className="more-btn"><Icon name="more"/></button></td>
@@ -529,13 +591,20 @@ function RepairTable({ compact = false, navigate, data, showFinancial = true }: 
 }
 
 function RepairBoard({ data }: { data: typeof repairs }) {
-  const cols = ["Received", "Diagnosing", "Awaiting Approval", "In Progress", "Testing", "Ready for Pickup"];
-  return <div className="kanban">{cols.map((col, i) => <div className="kanban-col" key={col}><div className="kanban-head"><Badge>{col}</Badge><span>{i === 3 ? 4 : i === 5 ? 3 : 2}</span></div>
-    {data.length > 0 && [data[i%data.length], data[(i+2)%data.length]].map((r,j)=><Card className="repair-card" key={r.id+j}><div><strong>{r.id}</strong><span className={`priority ${r.priority.toLowerCase()}`}>{r.priority}</span></div><h3>{r.device}</h3><p>{r.customer}</p><div className="repair-card-foot"><span><Icon name="clock" size={14}/>{r.eta}</span><div className="avatar tiny">{r.tech.split(" ").map(x=>x[0]).join("")}</div></div></Card>)}
-  </div>)}</div>;
+  const cols = ["Received", "Diagnosing", "Awaiting Approval", "In Progress", "Awaiting Parts", "Testing", "Ready for Pickup"];
+  return <div className="kanban">{cols.map((col) => {
+    // Group by real status instead of spreading the list across columns: the old
+    // modulo picking repeated the same card inside a column whenever fewer than
+    // three repairs were in scope (e.g. the technician and customer views).
+    const cards = data.filter((repair) => repair.status === col);
+    return <div className="kanban-col" key={col}><div className="kanban-head"><Badge>{col}</Badge><span>{cards.length}</span></div>
+      {cards.map((r)=><Card className="repair-card" key={r.id}><div><strong>{r.id}</strong><span className={`priority ${r.priority.toLowerCase()}`}>{r.priority}</span></div><h3>{r.device}</h3><p>{r.customer}</p><div className="repair-card-foot"><span><Icon name="clock" size={14}/>{r.eta}</span><div className="avatar tiny">{r.tech.split(" ").map(x=>x[0]).join("")}</div></div></Card>)}
+      {cards.length === 0 && <p className="kanban-empty">No repairs</p>}
+    </div>;
+  })}</div>;
 }
 
-function NewRepair({ navigate }: { navigate: (p: string) => void }) {
+function NewRepair({ navigate }: { navigate: (p: string, id?: string) => void }) {
   const [step, setStep] = useState(1);
   const labels = ["Customer", "Device", "Problem", "Repair details", "Review"];
   return <div className="form-layout"><Card className="step-card"><div className="steps">{labels.map((l,i)=><div className={step === i+1 ? "active" : step > i+1 ? "done" : ""} key={l}><span>{step > i+1 ? <Icon name="check" size={14}/> : i+1}</span><div><strong>{l}</strong><small>Step {i+1}</small></div></div>)}</div></Card>
@@ -548,14 +617,29 @@ function NewRepair({ navigate }: { navigate: (p: string) => void }) {
     </Card></div>;
 }
 
-function RepairDetails({ technician = false }: { technician?: boolean }) {
+/** Where each status sits on the 7 step repair workflow. */
+const workflowSteps = ["Received", "Diagnosing", "Approved", "Repairing", "Testing", "Ready", "Delivered"];
+const stepForStatus: Record<string, number> = {
+  Diagnosing: 1,
+  "Awaiting Approval": 1,
+  "Awaiting Parts": 2,
+  "In Progress": 3,
+  Testing: 4,
+  "Ready for Pickup": 5,
+  Delivered: 6,
+};
+
+function RepairDetails({ technician = false, repair }: { technician?: boolean; repair: (typeof repairs)[number] | undefined }) {
   const [tab, setTab] = useState("Overview");
-  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>FX-2026-004821</span><Badge>In Progress</Badge></div><h2>Dell Latitude 5420</h2><p>Nimal Perera · High priority</p></div></div><div className="repair-facts"><div><span>Technician</span><strong>John Silva</strong></div><div><span>Estimated completion</span><strong>Today, 4:30 PM</strong></div>{!technician && <div><span>Current total</span><strong>Rs. 18,500</strong></div>}</div></Card>
+  if (!repair) return <Card className="empty-module"><Icon name="tool" size={32}/><h2>No repair found</h2><p>You have no repair records you are authorized to open.</p></Card>;
+  const currentStep = stepForStatus[repair.status] ?? 1;
+  const customerInitials = repair.customer.split(" ").map((part) => part[0]).join("").slice(0, 2);
+  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>{repair.customer} · {repair.priority} priority</p></div></div><div className="repair-facts"><div><span>Technician</span><strong>{repair.tech}</strong></div><div><span>Estimated completion</span><strong>{repair.eta}</strong></div>{!technician && <div><span>Current total</span><strong>{repair.amount}</strong></div>}</div></Card>
     <div className="tabs">{(technician ? ["Overview","Diagnosis","Parts","Activities","Testing","Warranty"] : ["Overview","Diagnosis","Estimate","Parts","Activities","Testing","Invoice","Warranty"]).map(x=><button className={tab===x?"active":""} onClick={()=>setTab(x)} key={x}>{x}</button>)}</div>
     <div className="detail-grid"><Card><div className="card-head"><div><h2>{tab === "Overview" ? "Repair workflow" : tab}</h2><p>Connected repair record and activity</p></div><Button kind="secondary">Update</Button></div>
-      <div className="timeline">{["Received","Diagnosing","Approved","Repairing","Testing","Ready","Delivered"].map((x,i)=><div className={i<4?"complete":i===4?"current":""} key={x}><span>{i<4?<Icon name="check" size={13}/>:i+1}</span><small>{x}</small></div>)}</div>
-      <div className="note-box"><div className="kpi-icon purple"><Icon name="tool"/></div><div><strong>Technician update</strong><p>Cooling system cleaned and thermal paste replaced. Running stress tests before final quality check.</p><span>Today at 11:42 AM · D. Fernando</span></div></div>
-    </Card><Card className="customer-panel"><h2>Customer & device</h2><div className="customer-line"><div className="avatar">NP</div><div><strong>Nimal Perera</strong><span>+94 77 456 8291</span></div></div><hr/><div className="info-list"><div><span>Serial number</span><strong>DL5420-78X2</strong></div><div><span>Complaint</span><strong>Overheats and shuts down</strong></div><div><span>Accessories</span><strong>Charger, laptop bag</strong></div></div><Button kind="secondary">Contact customer</Button></Card></div>
+      <div className="timeline">{workflowSteps.map((x,i)=><div className={i<currentStep?"complete":i===currentStep?"current":""} key={x}><span>{i<currentStep?<Icon name="check" size={13}/>:i+1}</span><small>{x}</small></div>)}</div>
+      <div className="note-box"><div className="kpi-icon purple"><Icon name="tool"/></div><div><strong>Technician update</strong><p>{repair.customer.split(" ")[0]}'s {repair.device} is currently {repair.status.toLowerCase()}. The latest notes from the bench are recorded against this repair.</p><span>Today · {repair.tech}</span></div></div>
+    </Card><Card className="customer-panel"><h2>Customer & device</h2><div className="customer-line"><div className="avatar">{customerInitials}</div><div><strong>{repair.customer}</strong><span>{repair.id} · customer record</span></div></div><hr/><div className="info-list"><div><span>Serial number</span><strong>{repair.serial}</strong></div><div><span>Complaint</span><strong>{repair.complaint}</strong></div><div><span>Accessories</span><strong>{repair.accessories}</strong></div></div><Button kind="secondary">Contact customer</Button></Card></div>
   </>;
 }
 
@@ -572,7 +656,7 @@ function POS({ cart, setCart }: { cart: Record<string, number>; setCart: React.D
 }
 
 function Inventory() {
-  return <><div className="kpi-grid inventory-kpis">{[["Total Products","1,248","box"],["Stock Value","Rs. 8.42M","wallet"],["Low Stock","8","alert"],["Out of Stock","3","close"],["Reserved Stock","126 units","package"]].map(([a,b,c])=><Card className="kpi" key={a}><div className="kpi-icon blue"><Icon name={c as IconName}/></div><div className="kpi-label">{a}</div><div className="kpi-value">{b}</div></Card>)}</div><Card className="table-card"><div className="card-head table-title"><div><h2>Product inventory</h2><p>Available stock = On-hand stock − Reserved stock</p></div><div><Button kind="secondary" icon="download">Export</Button><Button icon="plus">Add product</Button></div></div><div className="table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On-hand</th><th>Reserved</th><th>Available</th><th>Cost</th><th>Selling price</th><th>Status</th></tr></thead><tbody>{products.map((p,i)=><tr key={p.name}><td><div className="product-name"><div className="product-mini"><Icon name={p.icon}/></div><strong>{p.name}</strong></div></td><td>{p.sku}</td><td><strong>{p.stock}</strong></td><td>{i+1}</td><td><strong>{p.stock-i-1}</strong></td><td>Rs. {Math.round(p.price*.64).toLocaleString()}</td><td><strong>Rs. {p.price.toLocaleString()}</strong></td><td><Badge tone={p.stock<5?"low-stock":"in-stock"}>{p.stock<5?"Low stock":"In stock"}</Badge></td></tr>)}</tbody></table></div></Card></>;
+  return <><div className="kpi-grid inventory-kpis">{[["Total Products",products.length.toLocaleString(),"box"],["Stock Value",`Rs. ${stockValue.toLocaleString()}`,"wallet"],["Low Stock",String(lowStock.length),"alert"],["Out of Stock",String(outOfStock),"close"],["Reserved Stock",`${reservedUnits} units`,"package"]].map(([a,b,c])=><Card className="kpi" key={String(a)}><div className="kpi-icon blue"><Icon name={c as IconName}/></div><div className="kpi-label">{a}</div><div className="kpi-value">{b}</div></Card>)}</div><Card className="table-card"><div className="card-head table-title"><div><h2>Product inventory</h2><p>Available stock = On-hand stock − Reserved stock</p></div><div><Button kind="secondary" icon="download">Export</Button><Button icon="plus">Add product</Button></div></div><div className="table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On-hand</th><th>Reserved</th><th>Available</th><th>Cost</th><th>Selling price</th><th>Status</th></tr></thead><tbody>{products.map((p)=>{const level = stockLevel(p);return <tr key={p.name}><td><div className="product-name"><div className="product-mini"><Icon name={p.icon}/></div><strong>{p.name}</strong></div></td><td>{p.sku}</td><td><strong>{p.stock}</strong></td><td>{p.reserved}</td><td><strong>{availableStock(p)}</strong></td><td>Rs. {Math.round(p.price*.64).toLocaleString()}</td><td><strong>Rs. {p.price.toLocaleString()}</strong></td><td><Badge tone={level==="ok"?"in-stock":"low-stock"}>{level==="ok"?"In stock":level==="critical"?"Critical":"Low stock"}</Badge></td></tr>})}</tbody></table></div></Card></>;
 }
 
 function AIDiagnosis({ analyzed, setAnalyzed }: { analyzed: boolean; setAnalyzed: (v:boolean)=>void }) {
@@ -601,8 +685,9 @@ function ModulePreview({ page, user }: { page: string; user: User }) {
   return <><div className={`module-hero ${isAI?"ai-module":""}`}><div className="kpi-icon purple"><Icon name={isAI?"spark":"chart"} size={24}/></div><div><h2>{page}</h2><p>{isAI ? "Ask questions across your authorized business data and receive actionable insights." : `A connected view of your ${page.toLowerCase()} workspace.`}</p></div>{!isLimited && <Button icon="plus">{isAI ? "Ask FixFlow AI" : `New ${page.replace(/s$/,"")}`}</Button>}</div>{!isLimited && <div className="insight-grid">{insights.map(([title,body,icon])=><Card className="insight-card" key={title}><div className="kpi-icon purple"><Icon name={icon as IconName}/></div><h3>{title}</h3><p>{body}</p><button>View details <Icon name="arrow" size={14}/></button></Card>)}</div>}<Card className="empty-module"><Icon name={isAI?"brain":"settings"} size={32}/><h2>{isAI ? "Ask anything about your authorized data" : `${page} workspace`}</h2><p>{isLimited ? `This private ${user.role.toLowerCase()} view contains only records assigned to your account.` : isAI ? "Try “Which products should we reorder this week?”" : "This module is connected and ready for your team."}</p><Button>{isAI?"Start a conversation":"Explore records"}</Button></Card></>;
 }
 
-function SearchModal({ user, data, close, navigate }: { user: User; data: typeof repairs; close:()=>void; navigate:(p:string)=>void }) {
+function SearchModal({ user, data, close, navigate }: { user: User; data: typeof repairs; close:()=>void; navigate:(p:string,id?:string)=>void }) {
   const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
   const actions: Record<Role, Array<[string,string,IconName]>> = {
     Admin: [["Create new repair","New Repair","plus"],["Open point of sale","POS","cart"],["Run AI diagnosis","AI Diagnosis","brain"]],
     Manager: [["View branch repairs","Repairs","tool"],["Open point of sale","POS","cart"],["View branch inventory","Inventory","box"]],
@@ -610,8 +695,30 @@ function SearchModal({ user, data, close, navigate }: { user: User; data: typeof
     Cashier: [["Open point of sale","POS","cart"],["Search branch customers","Customers","users"],["Open cash register","Cash Register","cash"]],
     Customer: [["Track my repair","My Repairs","tool"],["View my invoice","Invoices","file"],["Contact support","Support","phone"]],
   };
-  const visibleRepairs = query.trim() ? data.filter((repair) => `${repair.id} ${repair.device} ${repair.customer}`.toLowerCase().includes(query.toLowerCase())) : [];
-  return <div className="modal-wrap" onMouseDown={close}><div className="search-modal" onMouseDown={e=>e.stopPropagation()}><div className="command-input"><Icon name="search"/><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search your ${user.role.toLowerCase()} workspace...`}/><kbd>ESC</kbd></div>{visibleRepairs.length > 0 && <div className="search-section"><span>AUTHORIZED REPAIR RESULTS</span>{visibleRepairs.map((repair)=><button key={repair.id} onClick={()=>navigate(user.role === "Customer" ? "My Repair Details" : "Repair Details")}><span><Icon name="tool"/></span><div><strong>{repair.device}</strong><small>{repair.id} · {repair.status}</small></div><Icon name="chevron"/></button>)}</div>}<div className="search-section"><span>{query ? "AUTHORIZED ACTIONS" : "QUICK ACTIONS"}</span>{actions[user.role].map(([label,page,icon])=><button key={label} onClick={()=>navigate(page)}><span><Icon name={icon}/></span><div><strong>{label}</strong><small>{page}</small></div><Icon name="chevron"/></button>)}</div><div className="search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Open</span><span className="search-scope"><Icon name="shield" size={12}/>{user.role} results only</span></div></div></div>;
+  const visibleRepairs = query.trim() ? data.filter((repair) => `${repair.id} ${repair.device} ${repair.customer}`.toLowerCase().includes(query.trim().toLowerCase())) : [];
+  // One flat list so the arrow keys can move across both sections.
+  const results = [
+    ...visibleRepairs.map((repair) => ({ key: repair.id, icon: "tool" as IconName, label: repair.device, meta: `${repair.id} · ${repair.status}`, page: user.role === "Customer" ? "My Repair Details" : "Repair Details" })),
+    ...actions[user.role].map(([label, page, icon]) => ({ key: label, icon, label, meta: page, page })),
+  ];
+  const selected = results.length ? Math.min(active, results.length - 1) : -1;
+  const open = (index: number) => {
+    const result = results[index];
+    if (result) navigate(result.page);
+  };
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActive(selected + 1 < results.length ? selected + 1 : 0);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive(selected > 0 ? selected - 1 : Math.max(0, results.length - 1));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      open(selected);
+    }
+  };
+  return <div className="modal-wrap" onMouseDown={close}><div className="search-modal" role="dialog" aria-modal="true" aria-label="Search FixFlow" onMouseDown={e=>e.stopPropagation()}><div className="command-input"><Icon name="search"/><input autoFocus value={query} aria-label={`Search your ${user.role.toLowerCase()} workspace`} onChange={(event) => { setQuery(event.target.value); setActive(0); }} onKeyDown={handleKeyDown} placeholder={`Search your ${user.role.toLowerCase()} workspace...`}/><kbd>ESC</kbd></div>{visibleRepairs.length > 0 && <div className="search-section"><span>AUTHORIZED REPAIR RESULTS</span>{visibleRepairs.map((repair, index)=><button key={repair.id} className={index === selected ? "active" : ""} onMouseEnter={() => setActive(index)} onClick={()=>open(index)}><span><Icon name="tool"/></span><div><strong>{repair.device}</strong><small>{repair.id} · {repair.status}</small></div><Icon name="chevron"/></button>)}</div>}<div className="search-section"><span>{query ? "AUTHORIZED ACTIONS" : "QUICK ACTIONS"}</span>{actions[user.role].map(([label,page,icon], index)=>{const position = visibleRepairs.length + index; return <button key={label} className={position === selected ? "active" : ""} onMouseEnter={() => setActive(position)} onClick={()=>open(position)}><span><Icon name={icon}/></span><div><strong>{label}</strong><small>{page}</small></div><Icon name="chevron"/></button>})}</div><div className="search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Open</span><span className="search-scope"><Icon name="shield" size={12}/>{user.role} results only</span></div></div></div>;
 }
 
 export default App;

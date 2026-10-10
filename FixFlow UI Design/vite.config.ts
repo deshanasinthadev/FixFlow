@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
 
-import siteConfiguration from './.figma/make/site.json'
+import siteConfiguration from './.figma/make/site.json' with { type: 'json' }
 
 
 // Vite config — https://vitejs.dev/config/
@@ -18,7 +18,7 @@ export default defineConfig(({ mode }) => {
       minify: !emitSourcemaps,
     },
     plugins: [
-react(),
+      react(),
       tailwindcss(),
       figmaSiteConfiguration(siteConfiguration),
       figmaErrorOverlayReplay(),
@@ -27,13 +27,20 @@ react(),
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, './src'),
+        '@': path.resolve(import.meta.dirname, './src'),
       },
     },
     server: {
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
+      // The app is normally opened through a generated preview/proxy hostname
+      // (Figma Make, Codespaces, e2b, ngrok...). Vite 8 rejects any Host header
+      // it does not recognise, so allow those hosts explicitly via
+      // FIGMA_DEV_SERVER_ALLOWED_HOSTS="a.example.com,b.example.com".
+      allowedHosts: process.env.FIGMA_DEV_SERVER_ALLOWED_HOSTS
+        ? process.env.FIGMA_DEV_SERVER_ALLOWED_HOSTS.split(',').map((host) => host.trim())
+        : true,
       watch: {
         ignored: [
           '**/.figma/**',
@@ -43,6 +50,9 @@ react(),
     preview: {
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
+      allowedHosts: process.env.FIGMA_DEV_SERVER_ALLOWED_HOSTS
+        ? process.env.FIGMA_DEV_SERVER_ALLOWED_HOSTS.split(',').map((host) => host.trim())
+        : true,
     },
   }
 })
