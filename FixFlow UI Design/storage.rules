@@ -1,0 +1,107 @@
+rules_version = '2';
+
+// ============================================================================
+// Fix Flow — Firebase Storage security rules
+//
+// Path layout (built by src/firebase/storage.ts buildPath):
+//   {folder}/{ownerId}/{timestamp}-{sanitisedName}
+//
+// The ownerId segment is what makes ownership checkable, so it must always be
+// the uid of the user who owns the file — never a guess and never a name.
+//
+// Role, as in firestore.rules, comes from the custom token claim
+// `request.auth.token.role`, because it cannot be forged by the client.
+// ============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return signedIn() ? string(request.auth.token.get('role', '')) : '';
+    }
+
+    function isAdmin() { return role() == 'admin'; }
+    function isManager() { return role() == 'manager'; }
+    function isTechnician() { return role() == 'technician'; }
+    function isCashier() { return role() == 'cashier'; }
+    function isStaff() { return isAdmin() || isManager() || isTechnician() || isCashier(); }
+
+    // Mirrors MAX_UPLOAD_BYTES in src/firebase/storage.ts. Keeping the two in
+    // step matters: a client-side check is a convenience, this is the gate.
+    function withinSizeLimit() {
+      return request.resource.size < 10 * 1024 * 1024;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isPdf() {
+      return request.resource.contentType == 'application/pdf';
+    }
+
+    // ---- profile pictures: you may write your own folder only ----
+    match /profile-images/{ownerId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && request.auth.uid == ownerId
+                   && withinSizeLimit()
+                   && isImage();
+    }
+
+    // ---- photos of a device / the reported issue ----
+    // Uploaded by the customer filing the job, or by staff on their behalf.
+    match /device-images/{ownerId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && (isStaff() || request.auth.uid == ownerId)
+                   && withinSizeLimit()
+                   && isImage();
+    }
+
+    match /issue-images/{ownerId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && (isStaff() || request.auth.uid == ownerId)
+                   && withinSizeLimit()
+                   && isImage();
+    }
+
+    // ---- technician certificates and documents ----
+    // A technician may upload their own; only a manager/admin may remove them.
+    match /technician-documents/{ownerId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && (request.auth.uid == ownerId || isStaff())
+                   && withinSizeLimit()
+                   && (isImage() || isPdf());
+    }
+
+    // ---- repair reports, job cards, warranty files ----
+    match /repair-files/{ownerId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && isStaff()
+                   && withinSizeLimit()
+                   && (isImage() || isPdf());
+    }
+
+    // ---- generated invoice PDFs ----
+    // Written by staff (or a Cloud Function acting with admin privileges).
+    // Never writable by a customer: an invoice is a financial document.
+    match /invoice-files/{ownerId}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && (isAdmin() || isManager() || isCashier())
+                   && withinSizeLimit()
+                   && isPdf();
+    }
+
+    // Anything not matched above is denied. That is the safe default: a new
+    // folder gets no access until someone writes a rule for it deliberately.
+  }
+}

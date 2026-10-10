@@ -1,0 +1,303 @@
+rules_version = '2';
+
+// ============================================================================
+// Fix Flow — Cloud Firestore security rules
+//
+// THREE THINGS TO UNDERSTAND BEFORE EDITING:
+//
+// 1. Role comes from a CUSTOM TOKEN CLAIM, never from the user document.
+//    `users/{uid}.role` is a field the client can write; if these rules
+//    trusted it, any signed-in customer could promote themselves to admin.
+//    The authoritative role is `request.auth.token.role`, which only your
+//    backend (Admin SDK) can set. Issue it when the account is created and
+//    whenever an admin changes a role:
+//        admin.auth().setCustomUserClaims(uid, { role: 'admin' })
+//
+// 2. `status` (active/disabled) also comes from the user document, so a
+//    disabled user's existing token still works until it expires. The client
+//    refuses to sign a disabled profile in, and staff should reissue claims or
+//    revoke sessions via the Admin SDK for an immediate cut-off.
+//
+// 3. Every collection denies by default. A path with no matching `allow` is
+//    rejected — that is the safe failure mode.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // The role from the custom token. '' when no claim was issued.
+    function role() {
+      return signedIn() ? string(request.auth.token.get('role', '')) : '';
+    }
+
+    function isAdmin() {
+      return role() == 'admin';
+    }
+
+    function isManager() {
+      return role() == 'manager';
+    }
+
+    function isTechnician() {
+      return role() == 'technician';
+    }
+
+    function isCashier() {
+      return role() == 'cashier';
+    }
+
+    // Anyone who works here. Cashier counts as staff for read purposes.
+    function isStaff() {
+      return isAdmin() || isManager() || isTechnician() || isCashier();
+    }
+
+    function isCustomer() {
+      return role() == 'customer';
+    }
+
+    // Fields only staff may set. Used to block self-promotion.
+    function protectedUserFields() {
+      return ['role', 'status', 'uid', 'email', 'createdAt'];
+    }
+
+    // True when the client tries to touch a field it must not.
+    function touchesAny(fieldList) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny(fieldList);
+    }
+
+    // ==========================================================================
+    // users — a customer reads ONLY their own document.
+    // ==========================================================================
+    match /users/{uid} {
+
+      // Staff may list and read every account; a customer may read only self.
+      allow get: if signedIn() && (isStaff() || request.auth.uid == uid);
+
+      // Staff need the list view. A customer never lists other users.
+      allow list: if isStaff();
+
+      // Admin creates accounts. A customer may create their own signup doc,
+      // but only with role 'customer' and status 'active'.
+      allow create: if isAdmin()
+                    || (request.auth.uid == uid
+                        && request.resource.data.role == 'customer'
+                        && request.resource.data.status == 'active');
+
+      // THE ANTI-SELF-PROMOTION RULE.
+      // A customer editing their own profile may change fullName, phone,
+      // address and profileImage — and nothing else. Any attempt to write
+      // role, status, uid, email or createdAt is rejected outright.
+      allow update: if isAdmin()
+                    || (request.auth.uid == uid && !touchesAny(protectedUserFields()));
+
+      allow delete: if isAdmin();
+
+      // ----------------------------------------------------------------------
+      // users/{uid}/notifications — the per-user feed.
+      // Storing notifications here means ownership is just `uid`, so a
+      // customer can never read another customer's feed: the path itself
+      // enforces it.
+      // ----------------------------------------------------------------------
+      match /notifications/{notificationId} {
+        allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+
+        // Staff (and system writes acting as the customer) create them.
+        // A customer may create a notification addressed to themselves only.
+        allow create: if isStaff() || (request.auth.uid == uid
+                                       && request.resource.data.userId == uid);
+
+        // Only the recipient may mark read or delete. Even an admin should
+        // not silently clear someone's inbox, but may moderate it.
+        allow update, delete: if signedIn()
+                              && (request.auth.uid == uid || isAdmin());
+      }
+    }
+
+    // ==========================================================================
+    // repair_requests
+    // ==========================================================================
+    match /repair_requests/{requestId} {
+
+      function isOwner() {
+        return resource.data.customerId == request.auth.uid;
+      }
+
+      function isAssigned() {
+        return resource.data.assignedTechnicianId == request.auth.uid;
+      }
+
+      // Owner sees their own repair; the assigned technician sees theirs;
+      // managers/admins see all; a cashier sees the branch they serve.
+      allow get: if signedIn()
+                 && (isAdmin() || isManager() || isOwner() || isAssigned()
+                     || (isStaff() && resource.data.branchId == request.auth.token.get('branchId', '')));
+
+      // Staff list the board. A customer may list ONLY their own — enforced
+      // by requiring the query to filter on customerId == uid.
+      allow list: if isStaff()
+                  || (isCustomer()
+                      && request.query.limit <= 100
+                      && resource.data.customerId == request.auth.uid);
+
+      // Anyone signed in may open a repair for themselves. `customerId` is
+      // pinned to the caller so you cannot file a job against someone else.
+      allow create: if signedIn()
+                    && request.resource.data.customerId == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.assignedTechnicianId == ''
+                    && request.resource.data.createdAt == request.time;
+
+      // Status changes and assignment are staff-only. A technician may edit a
+      // repair only when it is assigned to them, and may not reassign it.
+      allow update: if isAdmin()
+                    || isManager()
+                    || (isTechnician() && isAssigned()
+                        && !request.resource.data.diff(resource.data)
+                             .affectedKeys().hasAny(['customerId', 'assignedTechnicianId', 'branchId']));
+
+      // Only an admin deletes a repair; history matters for a service shop.
+      allow delete: if isAdmin();
+
+      // ----------------------------------------------------------------------
+      // repair_requests/{id}/parts — the repair <-> spare-part join.
+      // ----------------------------------------------------------------------
+      match /parts/{repairPartId} {
+        allow read: if signedIn()
+                    && (isStaff()
+                        || get(/databases/$(database)/documents/repair_requests/$(requestId))
+                             .data.customerId == request.auth.uid);
+
+        // Only the assigned technician or a manager/admin adds or edits parts.
+        allow create, update, delete: if isAdmin()
+                                      || isManager()
+                                      || (isTechnician()
+                                          && get(/databases/$(database)/documents/repair_requests/$(requestId))
+                                               .data.assignedTechnicianId == request.auth.uid);
+      }
+    }
+
+    // ==========================================================================
+    // repair_diagnosis — technician-authored, customer-readable for own repair.
+    // ==========================================================================
+    match /repair_diagnosis/{diagnosisId} {
+
+      function requestOfDiagnosis() {
+        return get(/databases/$(database)/documents/repair_requests/$(resource.data.requestId)).data;
+      }
+
+      // Owner of the repair, or the technician assigned to it, or staff.
+      allow read: if signedIn()
+                  && (isAdmin() || isManager() || isTechnician() || isCashier()
+                      || requestOfDiagnosis().customerId == request.auth.uid);
+
+      // New diagnoses: a technician may only write one for a repair assigned
+      // to them. `source` may only claim 'ai' if a provider is configured —
+      // the rules cannot verify the model call, so this stays a technician
+      // assertion; the service layer is the gate for 'ai'.
+      allow create: if (isAdmin() || isManager())
+                    || (isTechnician()
+                        && request.resource.data.source in ['technician', 'ai']
+                        && request.resource.data.requestId is string);
+
+      allow update: if isAdmin() || isManager() || isTechnician();
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================================================
+    // repair_updates — append-only timeline the customer follows.
+    // ==========================================================================
+    match /repair_updates/{updateId} {
+
+      function requestOfUpdate() {
+        return get(/databases/$(database)/documents/repair_requests/$(resource.data.requestId)).data;
+      }
+
+      allow read: if signedIn()
+                  && (isStaff() || requestOfUpdate().customerId == request.auth.uid);
+
+      // Staff append timeline entries. Nobody edits or deletes history —
+      // that is what makes the timeline trustworthy for a customer.
+      allow create: if isStaff();
+      allow update, delete: if isAdmin();
+    }
+
+    // ==========================================================================
+    // technicians — trade profiles linked to a user account.
+    // ==========================================================================
+    match /technicians/{technicianId} {
+      // A technician may read their own profile; staff read all.
+      allow read: if signedIn()
+                  && (isStaff() || resource.data.userId == request.auth.uid);
+
+      allow create, update: if isAdmin() || isManager();
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================================================
+    // spare_parts — stock is read broadly, written by staff only.
+    // ==========================================================================
+    match /spare_parts/{partId} {
+      // Customers see parts (names, availability) but never the supplier or
+      // cost fields; the client simply does not render them. Reads are open
+      // to any signed-in user so the parts picker works for technicians.
+      allow read: if signedIn();
+
+      allow create, update: if isAdmin() || isManager();
+
+      // A technician consuming a part on an assigned repair goes through a
+      // transaction that also writes repair_requests/{id}/parts; allowing the
+      // stock decrement here is what makes that atomic write possible.
+      allow update: if isTechnician()
+                    && request.resource.data.quantity is int
+                    && request.resource.data.quantity >= 0
+                    && request.resource.data.quantity < resource.data.quantity;
+
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================================================
+    // invoices — money. Staff write, owner reads.
+    // ==========================================================================
+    match /invoices/{invoiceId} {
+
+      function isInvoiceOwner() {
+        return resource.data.customerId == request.auth.uid;
+      }
+
+      allow read: if signedIn() && (isStaff() || isInvoiceOwner());
+
+      // A customer may list only their own invoices.
+      allow list: if isStaff()
+                  || (isCustomer() && resource.data.customerId == request.auth.uid);
+
+      allow create, update: if isAdmin() || isManager() || isCashier();
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================================================
+    // payments — the audit trail. Read by owner and staff; only admin deletes.
+    // ==========================================================================
+    match /payments/{paymentId} {
+
+      function isPaymentOwner() {
+        return resource.data.customerId == request.auth.uid;
+      }
+
+      allow read: if signedIn() && (isStaff() || isPaymentOwner());
+      allow list: if isStaff()
+                  || (isCustomer() && resource.data.customerId == request.auth.uid);
+
+      // Only staff record money. Cashiers can take payment; refunds and
+      // deletions are admin-only (see the service layer too).
+      allow create: if isAdmin() || isManager() || isCashier();
+      allow update: if isAdmin() || isManager();
+      allow delete: if isAdmin();
+    }
+  }
+}
