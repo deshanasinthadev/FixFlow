@@ -5,7 +5,8 @@ import { inBranchScope, scopeFor } from "../../domain/permissions";
 import { DEVICE_CATEGORIES, PRIORITIES } from "../../domain/workflows";
 import { createRepair } from "../../services/repairService";
 import type { DeviceCategory, RepairPriority } from "../../domain/types";
-import { Button, Card, Field, PageHeader, Select, TextArea, TextInput } from "../../components/ui";
+import { Button, Card, Field, Select, TextArea, TextInput } from "../../components/ui";
+import { PageHeader } from "../../components/layout/AppShell";
 import { Icon } from "../../components/ui/Icon";
 
 const STEPS = ["Customer", "Device", "Problem", "Review"] as const;

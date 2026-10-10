@@ -4,6 +4,7 @@ import { navigate as go } from "../../app/router";
 import {
   activeRepairs,
   costOfGoodsCents,
+  countRepairsByStatus,
   dailyBuckets,
   delayedRepairs,
   expenseTotalCents,
@@ -19,10 +20,11 @@ import {
   type RangeKey,
 } from "../../domain/calculations";
 import { inBranchScope, scopeFor } from "../../domain/permissions";
-import { countRepairsByStatus, statusLabel, statusTone } from "../../domain/workflows";
-import type { Branch } from "../../domain/types";
+import type { Branch, Cents, RepairStatus } from "../../domain/types";
+import { statusLabel, statusTone } from "../../domain/workflows";
 import { formatMoney, formatShortDate, relativeTime } from "../../utils/format";
-import { Badge, Card, CardHead, DataTable, EmptyState, PageHeader, Segmented, Stat } from "../../components/ui";
+import { Badge, Card, CardHead, DataTable, EmptyState, Segmented, Stat } from "../../components/ui";
+import { PageHeader } from "../../components/layout/AppShell";
 import { BarList, DonutChart, LegendList, TrendChart } from "../../components/charts";
 import { Icon } from "../../components/ui/Icon";
 
@@ -75,11 +77,11 @@ export function DashboardPage() {
     [db.expenses, range, branchFilter],
   );
 
-  const statusCounts = useMemo(() => countRepairsByStatus(scopedRepairs), [scopedRepairs]);
+  const statusCounts = useMemo(() => countRepairsByStatus(scopedRepairs) as Record<string, number>, [scopedRepairs]);
   const active = useMemo(() => activeRepairs(scopedRepairs), [scopedRepairs]);
   const delayed = useMemo(() => delayedRepairs(scopedRepairs), [scopedRepairs]);
 
-  const salesTotal = salesRevenueCents(scopedSales);
+  const salesTotal: Cents = salesRevenueCents(scopedSales);
   const repairRevenue = repairRevenueCents(db, range, branchFilter);
   const cogs = costOfGoodsCents(scopedSales);
   const grossProfit = grossProfitCents(scopedSales);
@@ -113,10 +115,10 @@ export function DashboardPage() {
   }, [range, scopedSales]);
 
   const statusSegments = useMemo(() => {
-    const entries = Object.entries(statusCounts).sort((a, b) => b[1] - a[1]);
+    const entries = Object.entries(statusCounts).sort((a, b) => Number(b[1]) - Number(a[1]));
     return entries.slice(0, 7).map(([status, value], index) => ({
-      label: statusLabel(status as never),
-      value,
+      label: statusLabel(status as RepairStatus),
+      value: Number(value),
       color: STATUS_COLORS[index % STATUS_COLORS.length],
     }));
   }, [statusCounts]);
@@ -252,7 +254,7 @@ export function DashboardPage() {
               </div>
               <div className="line-chart">
                 <div className="y-labels">
-                  <span>{formatMoney(Math.max(1, ...trend.map((p) => p.value)), symbol, 0)}</span>
+                  <span>{formatMoney(Math.max(...trend.map((p) => p.value), 1), symbol, 0)}</span>
                   <span />
                   <span />
                   <span />

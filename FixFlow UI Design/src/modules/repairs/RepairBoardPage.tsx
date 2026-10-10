@@ -3,7 +3,8 @@ import { navigate as go } from "../../app/router";
 import { REPAIR_STATUSES } from "../../domain/workflows";
 import { isDelayed } from "../../domain/calculations";
 import { formatShortDate } from "../../utils/format";
-import { Badge, Card, EmptyState, PageHeader } from "../../components/ui";
+import { Badge, Card, EmptyState } from "../../components/ui";
+import { PageHeader } from "../../components/layout/AppShell";
 import { useScopedRepairs } from "./shared";
 
 /**

@@ -171,7 +171,7 @@ const users: User[] = [
 /* Customers and devices                                               */
 /* ------------------------------------------------------------------ */
 
-type CustomerSeed = [string, string, string, string, string?];
+type CustomerSeed = [string, string, string | undefined, string, string?];
 
 const customerSeeds: CustomerSeed[] = [
   ["Nimal Perera", "+94 77 456 8291", "nimal@email.lk", "Colombo 03", "br-colombo"],
@@ -219,7 +219,7 @@ const portalUsers: User[] = customers.map((customer, index) => ({
   createdAt: customer.registeredAt,
 }));
 
-type DeviceSeed = [number, Device["category"], string, string, string];
+type DeviceSeed = [number, Device["category"], string, string, string | undefined];
 const deviceSeeds: DeviceSeed[] = [
   [1, "laptop", "Dell", "Latitude 5420", "DL5420-78X2"],
   [1, "mobile", "Apple", "iPhone 13", "IP13-DX9K2L"],

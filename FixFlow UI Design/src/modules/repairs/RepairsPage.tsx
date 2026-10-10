@@ -10,13 +10,13 @@ import {
   Card,
   DataTable,
   EmptyState,
-  PageHeader,
   Pagination,
   SearchInput,
   Select,
   useDebounced,
   usePaged,
 } from "../../components/ui";
+import { PageHeader } from "../../components/layout/AppShell";
 import { matchesRepairSearch, PRIORITY_TONE, useScopedRepairs } from "./shared";
 import { Icon } from "../../components/ui/Icon";
 
