@@ -285,7 +285,7 @@ function App() {
           <button className="icon-btn mobile-menu" onClick={() => setMobileNav(true)}><Icon name="menu"/></button>
           <button className="global-search" onClick={() => setSearchOpen(true)}><Icon name="search"/><span>Search customers, repairs, invoices...</span><kbd>⌘ K</kbd></button>
           <div className="top-actions">
-            {!isCustomer && <button className="branch-select"><span className="branch-icon"><Icon name="branch" size={15}/></span><span>{user.branch}</span>{user.role === "Admin" && <Icon name="chevron" size={13}/>}</button>}
+            {!isCustomer && <span className="branch-select" title="Signed-in branch"><span className="branch-icon"><Icon name="branch" size={15}/></span><span>{user.branch}</span></span>}
             <button className="icon-btn theme-toggle" onClick={() => setDark(!dark)} title="Switch theme"><Icon name={dark ? "sun" : "moon"}/></button>
             <button className="icon-btn notification" onClick={() => navigate("Notifications")}><Icon name="bell"/><span/></button>
             <button className="profile" onClick={() => setProfileOpen(!profileOpen)}><div className="avatar">{initials}</div><div><strong>{user.name}</strong><small>{user.role}</small></div><Icon name="chevron" size={13}/></button>
@@ -443,7 +443,7 @@ function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void;
         </div>
       </Card>
       <Card className="repair-overview">
-        <div className="card-head"><div><h2>Repair overview</h2><p>Current workflow</p></div><button className="more-btn"><Icon name="more"/></button></div>
+        <div className="card-head"><div><h2>Repair overview</h2><p>Current workflow</p></div></div>
         <div className="donut-wrap"><div className="donut"><div><strong>64</strong><span>Total</span></div></div></div>
         <div className="status-list">
           {[["In progress", 18, "purple"], ["Testing", 12, "blue"], ["Ready for pickup", 12, "cyan"], ["Awaiting approval", 9, "pink"], ["Other", 13, "slate"]].map(([a,b,c]) => <div key={String(a)}><span className={`legend ${c}`}/><span>{a}</span><strong>{b}</strong></div>)}

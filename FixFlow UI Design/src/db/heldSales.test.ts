@@ -18,6 +18,16 @@ beforeEach(async () => {
   await db.ready()
 })
 
+/**
+ * Ordering here is by `createdAt`, which has millisecond resolution. Two holds
+ * issued back to back can land in the same millisecond, and then "newest first"
+ * has nothing to sort on. Yielding a real timer makes the assertion depend on
+ * the code rather than on how fast the machine happens to be. A real timer, not
+ * fake timers — faking the clock breaks the promise scheduling Dexie and
+ * IndexedDB rely on.
+ */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
+
 const hold = (over: Record<string, unknown> = {}) =>
   db.heldSales.hold({
     branchId: 'br_colombo',
@@ -117,7 +127,13 @@ describe('heldSales.list and discard', () => {
 
   it('returns newest first', async () => {
     const first = await hold()
+    await tick()
     const second = await hold()
+
+    // If this ever fails the assertion below is meaningless: it would be
+    // asserting an order the data does not actually establish.
+    expect(first.createdAt < second.createdAt).toBe(true)
+
     const all = await db.heldSales.list('br_colombo')
     expect(all[0].id).toBe(second.id)
     expect(all[1].id).toBe(first.id)
