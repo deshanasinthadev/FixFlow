@@ -914,8 +914,6 @@ const NOTIFICATION_ICON: Record<string, IconName> = {
 };
 
 function ModulePreview({ page, user, source }: { page: string; user: User; source: { repairs: RepairJob[]; products: Product[] } }) {
-  const isAI = page === "AI Assistant";
-  const isLimited = user.role === "Technician" || user.role === "Customer";
   if (page === "Notifications") {
     // §21 — derived from live records. A notification that cannot be traced to
     // a record trains people to ignore the panel.
@@ -930,10 +928,11 @@ function ModulePreview({ page, user, source }: { page: string; user: User; sourc
       {notes.map((note, index) => <div className="notification-row" key={note.id}><div className={`kpi-icon ${note.severity === "warning" ? "amber" : note.severity === "success" ? "cyan" : index === 0 ? "purple" : "blue"}`}><Icon name={NOTIFICATION_ICON[note.kind] ?? "bell"}/></div><div><strong>{note.title}</strong><p>{note.body}</p><span>{note.link}</span></div>{index === 0 && <i/>}</div>)}
     </Card>;
   }
-  const insights = isAI
-    ? [["Low stock alert","Five laptop chargers have reached the minimum stock level.","package"],["Repair workload","Technician workload is 18% higher than last week.","tool"],["Sales insight","Mobile accessories generated the highest sales this week.","chart"]]
-    : [["Total records","248 active records","file"],["Needs attention","8 items require review","alert"],["This month","+12.4% vs last month","chart"]];
-  return <><div className={`module-hero ${isAI?"ai-module":""}`}><div className="kpi-icon purple"><Icon name={isAI?"spark":"chart"} size={24}/></div><div><h2>{page}</h2><p>{isAI ? "Ask questions across your authorized business data and receive actionable insights." : `A connected view of your ${page.toLowerCase()} workspace.`}</p></div>{!isLimited && <Button icon="plus">{isAI ? "Ask FixFlow AI" : `New ${page.replace(/s$/,"")}`}</Button>}</div>{!isLimited && <div className="insight-grid">{insights.map(([title,body,icon])=><Card className="insight-card" key={title}><div className="kpi-icon purple"><Icon name={icon as IconName}/></div><h3>{title}</h3><p>{body}</p><button>View details <Icon name="arrow" size={14}/></button></Card>)}</div>}<Card className="empty-module"><Icon name={isAI?"brain":"settings"} size={32}/><h2>{isAI ? "Ask anything about your authorized data" : `${page} workspace`}</h2><p>{isLimited ? `This private ${user.role.toLowerCase()} view contains only records assigned to your account.` : isAI ? "Try “Which products should we reorder this week?”" : "This module is connected and ready for your team."}</p><Button>{isAI?"Start a conversation":"Explore records"}</Button></Card></>;
+  // Anything reaching here is a sidebar label with no screen behind it. It says
+  // so plainly. Inventing record counts, growth percentages or a "connected and
+  // ready" claim for a module that does not exist is worse than an empty state,
+  // because it cannot be distinguished from a module that does work (§32).
+  return <Card className="empty-module"><Icon name="settings" size={32}/><h2>{page} is not built yet</h2><p>This menu item has no screen behind it. Nothing on this page is connected to your data, and no records will appear here until the module is implemented.</p></Card>;
 }
 
 function SearchModal({ user, data, close, navigate }: { user: User; data: RepairRow[]; close:()=>void; navigate:(p:string)=>void }) {
