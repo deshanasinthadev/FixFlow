@@ -9,6 +9,8 @@ import type {
   Estimate,
   EstimateItem,
   EstimateStatus,
+  Expense,
+  ExpenseCategory,
   Invoice,
   InvoiceStatus,
   Payment,
@@ -30,6 +32,7 @@ import {
   invoiceStatusFor,
   sumLines,
 } from '../domain/calculations'
+import { EXPENSE_CATEGORIES } from '../domain/types'
 import {
   assertEstimateRevision,
   canRecordApproval,
@@ -45,6 +48,7 @@ import type {
   CustomerInput,
   EstimateInput,
   HoldSaleInput,
+  ExpenseInput,
   InvoiceInput,
   InvoiceWithBalance,
   OpenCashSessionInput,
@@ -115,6 +119,7 @@ export function createDb(name: string = DB_NAME): Db {
     heldSales!: Table<HeldSale, string>
     invoices!: Table<Invoice, string>
     payments!: Table<Payment, string>
+    expenses!: Table<Expense, string>
 
     constructor() {
       super(name)
@@ -153,6 +158,10 @@ export function createDb(name: string = DB_NAME): Db {
       this.version(6).stores({
         invoices: 'id, invoiceNumber, branchId, customerId, repairId, saleId, status, createdAt',
         payments: 'id, invoiceId, customerId, branchId, status, paidAt',
+      })
+      // Version 7 adds operating expenses (§18).
+      this.version(7).stores({
+        expenses: 'id, branchId, category, spentAt, recordedBy',
       })
     }
   }
@@ -1366,6 +1375,78 @@ export function createDb(name: string = DB_NAME): Db {
           await resettle(invoiceId)
           return reversal
         })
+      },
+    },
+
+    expenses: {
+      async list(filter: { branchId?: string; category?: ExpenseCategory; from?: string; to?: string } = {}) {
+        let rows = await raw.expenses.toArray()
+        if (filter.branchId) rows = rows.filter((e) => e.branchId === filter.branchId)
+        if (filter.category) rows = rows.filter((e) => e.category === filter.category)
+        if (filter.from) rows = rows.filter((e) => e.spentAt >= filter.from!)
+        if (filter.to) rows = rows.filter((e) => e.spentAt <= filter.to!)
+        // Excluding reversals would hide the correction; including them nets to
+        // zero, which is the point of reversing rather than deleting.
+        return rows.sort((a, b) => (a.spentAt < b.spentAt ? 1 : -1))
+      },
+
+      async create(input: ExpenseInput): Promise<Expense> {
+        const amount = Math.round(input.amount)
+        if (!Number.isInteger(amount) || amount <= 0) {
+          throw new Error('Enter an expense amount greater than zero.')
+        }
+        if (!input.description.trim()) throw new Error('An expense needs a description.')
+        if (!EXPENSE_CATEGORIES.includes(input.category)) {
+          throw new Error(`"${input.category}" is not an expense category.`)
+        }
+        if (!input.spentAt || Number.isNaN(Date.parse(input.spentAt))) {
+          throw new Error('An expense needs a valid date.')
+        }
+        return raw.transaction('rw', [raw.expenses], async () => {
+          const expense: Expense = {
+            id: newId('exp'),
+            branchId: input.branchId,
+            category: input.category,
+            amount,
+            description: input.description.trim(),
+            method: input.method,
+            attachmentUrl: '',
+            spentAt: new Date(input.spentAt).toISOString(),
+            recordedBy: input.recordedBy,
+            createdAt: nowIso(),
+          }
+          await raw.expenses.add(expense)
+          return expense
+        })
+      },
+
+      async reverse(id: string, actorId: string, reason: string): Promise<Expense> {
+        if (!reason.trim()) throw new Error('Record why the expense is being reversed.')
+        return raw.transaction('rw', [raw.expenses], async () => {
+          const original = await raw.expenses.get(id)
+          if (!original) throw new Error(`No expense ${id}`)
+          if (original.amount < 0) throw new Error('That entry is already a reversal.')
+
+          // §28.18 — a correcting entry, never an edit to the original. The
+          // negative amount is what makes the pair net to zero in every total.
+          const reversal: Expense = {
+            ...original,
+            id: newId('exp'),
+            amount: -original.amount,
+            description: `Reversal: ${original.description}`,
+            spentAt: nowIso(),
+            recordedBy: actorId,
+            createdAt: nowIso(),
+          }
+          await raw.expenses.add(reversal)
+          void reason
+          return reversal
+        })
+      },
+
+      async total(filter: { branchId?: string; from?: string; to?: string } = {}) {
+        const rows = await repository.expenses.list(filter)
+        return rows.reduce((sum, e) => sum + e.amount, 0)
       },
     },
 

@@ -7,6 +7,8 @@ import type {
   Device,
   Estimate,
   EstimateStatus,
+  Expense,
+  ExpenseCategory,
   Invoice,
   InvoiceStatus,
   Payment,
@@ -198,6 +200,25 @@ export interface Db {
     nextInvoiceNumber(branchId: string, year?: number): Promise<string>
   }
 
+  /**
+   * §18 — operating expenses.
+   *
+   * Kept apart from cost of goods on purpose: COGS is what a sale cost to make
+   * and moves with revenue, while these are what the business costs to run
+   * whether it sells anything or not. Conflating the two is how a P&L stops
+   * meaning anything.
+   */
+  expenses: {
+    list(filter?: { branchId?: string; category?: ExpenseCategory; from?: string; to?: string }): Promise<Expense[]>
+    create(input: ExpenseInput): Promise<Expense>
+    /**
+     * §28.18 — a correction adds a reversing entry rather than editing or
+     * deleting the original, so the books still show what was recorded.
+     */
+    reverse(id: string, actorId: string, reason: string): Promise<Expense>
+    total(filter?: { branchId?: string; from?: string; to?: string }): Promise<number>
+  }
+
   payments: {
     forInvoice(invoiceId: string): Promise<Payment[]>
     list(filter?: { branchId?: string; customerId?: string; status?: PaymentStatus }): Promise<Payment[]>
@@ -265,6 +286,18 @@ export interface EstimateInput {
   notes?: string
   expiresAt?: string
   actorId: string
+}
+
+export interface ExpenseInput {
+  branchId: string
+  category: ExpenseCategory
+  /** Minor units. */
+  amount: number
+  description: string
+  method: PaymentMethodId
+  /** ISO date the money was actually spent, not the day it was typed in. */
+  spentAt: string
+  recordedBy: string
 }
 
 export interface InvoiceInput {
