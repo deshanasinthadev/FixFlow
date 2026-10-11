@@ -465,18 +465,26 @@ function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void;
 function RoleDashboard({ user, data, navigate, figures, sales }: { user: User; data: RepairRow[]; navigate: (page: string, param?: string) => void; figures: DashboardFigures; sales: Sale[] }) {
   if (user.role === "Customer") {
     const repair = data[0];
+    // Every figure below is computed from this visitor's own records. The card
+    // used to show "Rs. 18,500" and "43 days" to whoever signed in — a customer
+    // portal is the worst place for an invented number, because the person
+    // reading it has no way to check it.
+    const mySales = sales.filter((sale) => sale.customerId === user.customerId)
+    const outstanding = mySales.reduce((sum, sale) => sum + Math.max(0, sale.total - sale.amountPaid), 0)
+    const pendingQuotes = data.filter((row) => row.status === "Awaiting Approval").length
     return <div className="customer-dashboard">
       <Card className="customer-status-hero"><div className="customer-status-copy"><span className="portal-kicker">ACTIVE REPAIR</span><div><h2>{repair?.device || "No active repairs"}</h2>{repair && <Badge>{repair.status}</Badge>}</div><p>{repair?.id} · Estimated completion {repair?.eta}</p><Button onClick={() => navigate("My Repair Details")}>View repair details <Icon name="arrow" size={15}/></Button></div><div className="status-device"><Icon name="laptop" size={42}/><span>Repair in progress</span></div></Card>
       <div className="kpi-grid customer-kpis">
         {[
           ["My Active Repairs", String(data.length), "tool", "purple"],
-          ["Pending Quote", "1", "file", "pink"],
-          ["Outstanding Invoice", "Rs. 18,500", "receipt", "blue"],
-          ["Warranty Status", "43 days", "shield", "cyan"],
-        ].map(([label, value, icon, tone]) => <Card className="kpi" key={label}><div className={`kpi-icon ${tone}`}><Icon name={icon as IconName}/></div><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div><div className="kpi-change positive">Up to date <span>your account only</span></div></Card>)}
+          ["Pending Quote", String(pendingQuotes), "file", "pink"],
+          ["Outstanding Invoice", formatLKR(outstanding), "receipt", "blue"],
+        ].map(([label, value, icon, tone]) => <Card className="kpi" key={label}><div className={`kpi-icon ${tone}`}><Icon name={icon as IconName}/></div><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div><div className="kpi-change positive">From your records <span>your account only</span></div></Card>)}
       </div>
       <div className="customer-home-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Repair progress</h2><p>We'll notify you whenever your repair moves forward.</p></div><Badge>{repair?.status || "No repair"}</Badge></div><div className="portal-progress">{["Received","Diagnosing","Repairing","Testing","Ready for Pickup","Delivered"].map((item, index) => <div className={index < 3 ? "complete" : index === 3 ? "current" : ""} key={item}><span>{index < 3 ? <Icon name="check" size={14}/> : index + 1}</span><div><strong>{item}</strong><small>{index < 3 ? "Completed" : index === 3 ? "Next quality check" : "Pending"}</small></div></div>)}</div></Card>
-        <Card className="portal-actions"><div className="card-head"><div><h2>Needs your attention</h2><p>Actions for your account</p></div></div><div className="attention-item"><div className="kpi-icon pink"><Icon name="file"/></div><div><strong>Estimate ready to review</strong><span>Review and approve Rs. 18,500</span></div><Icon name="chevron"/></div><div className="attention-item"><div className="kpi-icon blue"><Icon name="bell"/></div><div><strong>Latest update</strong><span>Repair work is now in progress</span></div><Icon name="chevron"/></div><Button kind="secondary" onClick={() => navigate("Support")}>Contact support</Button></Card>
+        <Card className="portal-actions"><div className="card-head"><div><h2>Needs your attention</h2><p>Actions for your account</p></div></div>{pendingQuotes > 0 && <div className="attention-item"><div className="kpi-icon pink"><Icon name="file"/></div><div><strong>Estimate ready to review</strong><span>{pendingQuotes} repair{pendingQuotes === 1 ? "" : "s"} awaiting your approval</span></div><Icon name="chevron"/></div>}
+          {repair && <div className="attention-item"><div className="kpi-icon blue"><Icon name="bell"/></div><div><strong>Latest update</strong><span>{repair.id} is {repair.status}</span></div><Icon name="chevron"/></div>}
+          {pendingQuotes === 0 && !repair && <p className="muted">Nothing needs your attention right now.</p>}<Button kind="secondary" onClick={() => navigate("Support")}>Contact support</Button></Card>
       </div>
     </div>;
   }
