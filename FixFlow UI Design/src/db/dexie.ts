@@ -22,9 +22,13 @@ import type {
   RepairPartUsage,
   RepairStatus,
   RepairStatusHistoryEntry,
+  PurchaseOrder,
+  PurchaseOrderItem,
+  PurchaseOrderStatus,
   Sale,
   SaleItem,
   StockReservation,
+  Supplier,
   User,
   Warranty,
   WarrantyClaim,
@@ -37,6 +41,8 @@ import {
   computeDocument,
   invoiceStatusFor,
   isWarrantyActive,
+  purchaseOrderTotal,
+  purchaseQuantityReceived,
   isWarrantyExpiringSoon,
   sumLines,
   warrantyExpiry,
@@ -50,6 +56,9 @@ import {
   canTransitionClaim,
   canTransitionEstimate,
   ESTIMATE_STATUS_LABEL,
+  canTransitionPurchaseOrder,
+  isPurchaseOrderReceivable,
+  purchaseOrderStatusFor,
   STATUSES_REQUIRING_APPROVAL,
   WARRANTY_CLAIM_TRANSITIONS,
 } from '../domain/workflows'
@@ -79,6 +88,9 @@ import type {
   WarrantyInput,
   AuditEntryInput,
   AuditFilter,
+  GoodsReceivedInput,
+  PurchaseOrderInput,
+  SupplierInput,
   WarrantyPolicyInput,
   SaleFilter,
   StockAdjust,
@@ -136,6 +148,10 @@ export function createDb(name: string = DB_NAME): Db {
     /** §17 — issued cover; the row is the contract, not the policy */
     warranties!: Table<Warranty, string>
     warrantyClaims!: Table<WarrantyClaim, string>
+    /** §12 — who stock is bought from */
+    suppliers!: Table<Supplier, string>
+    /** §12 — an order placed; stock moves only when goods arrive */
+    purchaseOrders!: Table<PurchaseOrder, string>
     /** §23 — who did what, when. Append-only. */
     auditLog!: Table<AuditLogEntry, string>
     sales!: Table<Sale, string>
@@ -204,6 +220,11 @@ export function createDb(name: string = DB_NAME): Db {
       // §23 — the audit trail. Append-only: nothing edits or deletes a row.
       this.version(10).stores({
         auditLog: 'id, actorId, action, targetType, targetId, branchId, at',
+      })
+      // §12 — suppliers and purchase orders.
+      this.version(11).stores({
+        suppliers: 'id, name, phone, createdAt',
+        purchaseOrders: 'id, poNumber, supplierId, branchId, status, createdAt',
       })
     }
   }
@@ -2173,6 +2194,252 @@ export function createDb(name: string = DB_NAME): Db {
           && (!filter.actorId || e.actorId === filter.actorId)
           && (!filter.action || e.action === filter.action)
           && (!filter.targetType || e.targetType === filter.targetType))
+      },
+    },
+
+    // §12 — purchasing. Raising an order is a promise to buy; only goods
+    // arriving is stock. Those two events are kept apart here on purpose.
+    suppliers: {
+      list: async () => {
+        const rows = await raw.suppliers.orderBy('name').toArray()
+        return rows
+      },
+
+      get: (id) => raw.suppliers.get(id),
+
+      async create(input: SupplierInput): Promise<Supplier> {
+        if (!input.name.trim()) throw new Error('A supplier needs a name.')
+        const supplier: Supplier = {
+          id: newId('sup'),
+          name: input.name.trim(),
+          contactPerson: input.contactPerson?.trim() ?? '',
+          phone: input.phone?.trim() ?? '',
+          email: input.email?.trim() ?? '',
+          address: input.address?.trim() ?? '',
+          notes: input.notes?.trim() ?? '',
+          // Derived, never stored: a stored balance goes stale the moment a
+          // payment is recorded against it.
+          balancePayable: 0,
+          createdAt: nowIso(),
+        }
+        await raw.suppliers.add(supplier)
+        return supplier
+      },
+
+      async update(id: string, input: SupplierInput): Promise<Supplier> {
+        const existing = await raw.suppliers.get(id)
+        if (!existing) throw new Error(`No supplier ${id}`)
+        if (!input.name.trim()) throw new Error('A supplier needs a name.')
+        const updated: Supplier = {
+          ...existing,
+          name: input.name.trim(),
+          contactPerson: input.contactPerson?.trim() ?? '',
+          phone: input.phone?.trim() ?? '',
+          email: input.email?.trim() ?? '',
+          address: input.address?.trim() ?? '',
+          notes: input.notes?.trim() ?? '',
+        }
+        await raw.suppliers.put(updated)
+        return updated
+      },
+    },
+
+    purchaseOrders: {
+      async list(filter: { branchId?: string; supplierId?: string; status?: PurchaseOrderStatus } = {}) {
+        let rows = await raw.purchaseOrders.toArray()
+        if (filter.branchId) rows = rows.filter((o) => o.branchId === filter.branchId)
+        if (filter.supplierId) rows = rows.filter((o) => o.supplierId === filter.supplierId)
+        if (filter.status) rows = rows.filter((o) => o.status === filter.status)
+        return rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      },
+
+      get: (id) => raw.purchaseOrders.get(id),
+
+      async create(input: PurchaseOrderInput): Promise<PurchaseOrder> {
+        const supplier = await raw.suppliers.get(input.supplierId)
+        if (!supplier) throw new Error(`No supplier ${input.supplierId}`)
+        const branch = await raw.branches.get(input.branchId)
+        if (!branch) throw new Error(`No branch ${input.branchId}`)
+        if (!input.lines.length) throw new Error('An order needs at least one line.')
+
+        const products = await raw.products.where('id').anyOf(input.lines.map((l) => l.productId)).toArray()
+        const byId = new Map(products.map((pr) => [pr.id, pr]))
+
+        const items: PurchaseOrderItem[] = []
+        for (const line of input.lines) {
+          // Validated before any rounding: rounding first would silently turn
+          // 1.5 into 2 and order a unit nobody asked for.
+          if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+            throw new Error('Enter a whole number of units greater than zero.')
+          }
+          if (!Number.isInteger(line.unitCost) || line.unitCost < 0) {
+            throw new Error('Enter the unit cost in whole cents.')
+          }
+          const product = byId.get(line.productId)
+          if (!product) throw new Error(`No product ${line.productId}`)
+          if (product.isService) throw new Error(`${product.name} is a service; it cannot be ordered in.`)
+          items.push({
+            id: newId('poi'),
+            productId: product.id,
+            productName: product.name,
+            quantityOrdered: line.quantity,
+            quantityReceived: 0,
+            unitCost: line.unitCost,
+          })
+        }
+
+        const order: PurchaseOrder = {
+          id: newId('po'),
+          poNumber: await this.nextPoNumber(input.branchId),
+          supplierId: supplier.id,
+          branchId: input.branchId,
+          items,
+          // A new order is a draft: it has not even been sent, let alone
+          // filled, so nothing about it touches the shelf.
+          status: 'draft',
+          supplierInvoiceNumber: input.supplierInvoiceNumber?.trim() ?? '',
+          total: purchaseOrderTotal(items),
+          createdAt: nowIso(),
+          receivedAt: '',
+        }
+        await raw.purchaseOrders.add(order)
+        return order
+      },
+
+      async send(id: string, actorId: string): Promise<PurchaseOrder> {
+        const order = await raw.purchaseOrders.get(id)
+        if (!order) throw new Error(`No purchase order ${id}`)
+        if (!canTransitionPurchaseOrder(order.status, 'sent')) {
+          throw new Error(`An order that is ${order.status.replace('_', ' ')} cannot be sent.`)
+        }
+        const next = { ...order, status: 'sent' as const }
+        await raw.purchaseOrders.put(next)
+        await raw.auditLog.add({
+          id: newId('aud'),
+          actorId,
+          actorName: (await raw.users.get(actorId))?.fullName ?? actorId,
+          action: 'purchase_order.sent',
+          targetType: 'purchase_order',
+          targetId: id,
+          detail: `${order.poNumber} sent for Rs. ${(order.total / 100).toFixed(2)}`,
+          branchId: order.branchId,
+          at: nowIso(),
+        })
+        return next
+      },
+
+      async receiveGoods(id: string, input: GoodsReceivedInput): Promise<PurchaseOrder> {
+        if (!input.lines.length) throw new Error('Record what actually arrived.')
+        return raw.transaction('rw', [raw.purchaseOrders, raw.products, raw.movements, raw.auditLog, raw.users], async () => {
+          const order = await raw.purchaseOrders.get(id)
+          if (!order) throw new Error(`No purchase order ${id}`)
+          // §28.4 — an order that is still a draft has not been sent, and one
+          // already complete has nothing left to receive.
+          if (!isPurchaseOrderReceivable(order.status)) {
+            throw new Error(`An order that is ${order.status.replace('_', ' ')} cannot receive goods.`)
+          }
+
+          const byProduct = new Map(order.items.map((item) => [item.productId, item]))
+          for (const line of input.lines) {
+            if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+              throw new Error('Enter a whole number of units greater than zero.')
+            }
+            const item = byProduct.get(line.productId)
+            if (!item) throw new Error(`${line.productId} is not on ${order.poNumber}.`)
+            const outstanding = item.quantityOrdered - item.quantityReceived
+            // §28.5 — receiving more than was ordered would put stock on the
+            // shelf that nobody bought, and quietly break the payable.
+            if (line.quantity > outstanding) {
+              throw new Error(
+                `${item.productName}: only ${outstanding} of ${item.quantityOrdered} still outstanding on ${order.poNumber}.`,
+              )
+            }
+          }
+
+          const updatedItems = order.items.map((item) => {
+            const arrived = input.lines.find((l) => l.productId === item.productId)
+            return arrived ? { ...item, quantityReceived: item.quantityReceived + arrived.quantity } : item
+          })
+
+          // Stock moves by what arrived, in the same transaction, so the shelf
+          // and the ledger cannot disagree about the delivery.
+          for (const line of input.lines) {
+            await writeMovement({
+              productId: line.productId,
+              branchId: order.branchId,
+              type: 'purchase_in',
+              qty: line.quantity,
+              reason: `Received on ${order.poNumber}`,
+              refId: order.id,
+              actorId: input.actorId,
+            })
+          }
+
+          const receivedTotal = purchaseQuantityReceived(updatedItems)
+          const orderedTotal = updatedItems.reduce((sum, item) => sum + item.quantityOrdered, 0)
+          const status = purchaseOrderStatusFor(receivedTotal, orderedTotal)
+
+          const next: PurchaseOrder = {
+            ...order,
+            items: updatedItems,
+            status,
+            supplierInvoiceNumber: input.supplierInvoiceNumber?.trim() || order.supplierInvoiceNumber,
+            receivedAt: status === 'received' ? nowIso() : order.receivedAt,
+          }
+          await raw.purchaseOrders.put(next)
+
+          await raw.auditLog.add({
+            id: newId('aud'),
+            actorId: input.actorId,
+            actorName: (await raw.users.get(input.actorId))?.fullName ?? input.actorId,
+            action: 'purchase_order.received',
+            targetType: 'purchase_order',
+            targetId: id,
+            detail: `${receivedTotal} of ${orderedTotal} units received on ${order.poNumber}`,
+            branchId: order.branchId,
+            at: nowIso(),
+          })
+          return next
+        })
+      },
+
+      async cancel(id: string, actorId: string, reason: string): Promise<PurchaseOrder> {
+        if (!reason.trim()) throw new Error('Record why the order is being cancelled.')
+        const order = await raw.purchaseOrders.get(id)
+        if (!order) throw new Error(`No purchase order ${id}`)
+        if (!canTransitionPurchaseOrder(order.status, 'cancelled')) {
+          throw new Error(`An order that is ${order.status.replace('_', ' ')} cannot be cancelled.`)
+        }
+        // Goods that have arrived are stock now. Cancelling the order would
+        // leave units on the shelf that no order explains.
+        if (purchaseQuantityReceived(order.items) > 0) {
+          throw new Error('Goods have already arrived against this order. Record the shortfall instead of cancelling.')
+        }
+        const next = { ...order, status: 'cancelled' as const }
+        await raw.purchaseOrders.put(next)
+        await raw.auditLog.add({
+          id: newId('aud'),
+          actorId,
+          actorName: (await raw.users.get(actorId))?.fullName ?? actorId,
+          action: 'purchase_order.cancelled',
+          targetType: 'purchase_order',
+          targetId: id,
+          detail: `${order.poNumber} cancelled. Reason: ${reason}`,
+          branchId: order.branchId,
+          at: nowIso(),
+        })
+        return next
+      },
+
+      async nextPoNumber(branchId: string): Promise<string> {
+        const branch = await raw.branches.get(branchId)
+        const year = nowIso().slice(0, 4)
+        const prefix = `PO-${branch?.code ?? 'BR'}-${year}-`
+        const all = await raw.purchaseOrders.toArray()
+        const highest = all
+          .filter((o) => o.poNumber.startsWith(prefix))
+          .reduce((max, o) => Math.max(max, Number(o.poNumber.split('-').pop()) || 0), 0)
+        return `${prefix}${String(highest + 1).padStart(4, '0')}`
       },
     },
   }

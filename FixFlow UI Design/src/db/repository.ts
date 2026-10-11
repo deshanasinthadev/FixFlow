@@ -16,7 +16,10 @@ import type {
   PaymentMethodId,
   RepairJob,
   AuditLogEntry,
+  PurchaseOrder,
+  PurchaseOrderStatus,
   RepairPartUsage,
+  Supplier,
   Warranty,
   WarrantyClaim,
   WarrantyClaimStatus,
@@ -356,6 +359,42 @@ export interface Db {
     /** Newest first. */
     list(filter?: AuditFilter): Promise<AuditLogEntry[]>
   }
+
+  /**
+   * Purchasing (§12).
+   *
+   * The rule that makes this honest: raising a purchase order does not put
+   * stock on the shelf. Ordering ten chargers and having ten arrive are two
+   * different events, and only the second one moves a number a customer can
+   * buy against. Partial deliveries are ordinary, so receiving is per line and
+   * can happen more than once.
+   */
+  suppliers: {
+    list(): Promise<Supplier[]>
+    get(id: string): Promise<Supplier | undefined>
+    create(input: SupplierInput): Promise<Supplier>
+    update(id: string, input: SupplierInput): Promise<Supplier>
+  }
+
+  purchaseOrders: {
+    list(filter?: { branchId?: string; supplierId?: string; status?: PurchaseOrderStatus }): Promise<PurchaseOrder[]>
+    get(id: string): Promise<PurchaseOrder | undefined>
+    /** Places the order. Stock does not move. */
+    create(input: PurchaseOrderInput): Promise<PurchaseOrder>
+    /** Marks it as sent to the supplier. Stock still does not move. */
+    send(id: string, actorId: string): Promise<PurchaseOrder>
+    /**
+     * Records goods arriving and increases stock by exactly what arrived.
+     *
+     * Refuses more than was ordered, and refuses an order that is not in a
+     * receivable state. The stock movement names the order, so a shelf count
+     * can always be traced back to the delivery that caused it.
+     */
+    receiveGoods(id: string, input: GoodsReceivedInput): Promise<PurchaseOrder>
+    /** Withdraws an order that will not be filled. Refuses once goods have arrived. */
+    cancel(id: string, actorId: string, reason: string): Promise<PurchaseOrder>
+    nextPoNumber(branchId: string): Promise<string>
+  }
 }
 
 /**
@@ -378,6 +417,42 @@ export interface EstimateInput {
   taxEnabled?: boolean
   notes?: string
   expiresAt?: string
+  actorId: string
+}
+
+/** §12 — a supplier the branch buys from. */
+export interface SupplierInput {
+  name: string
+  contactPerson?: string
+  phone?: string
+  email?: string
+  address?: string
+  notes?: string
+}
+
+export interface PurchaseOrderLine {
+  productId: string
+  quantity: number
+  /** Minor units. */
+  unitCost: number
+}
+
+export interface PurchaseOrderInput {
+  supplierId: string
+  branchId: string
+  lines: PurchaseOrderLine[]
+  supplierInvoiceNumber?: string
+}
+
+/**
+ * §12, §28.4-5 — goods arriving against an order.
+ *
+ * Quantities are what actually turned up, which may be less than what was
+ * ordered. Stock moves by these numbers and no others.
+ */
+export interface GoodsReceivedInput {
+  lines: { productId: string; quantity: number }[]
+  supplierInvoiceNumber?: string
   actorId: string
 }
 
