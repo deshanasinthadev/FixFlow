@@ -57,6 +57,12 @@ export function EstimatesPage({ branchId, actorId, canDecide, canSend, customerS
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [done, setDone] = useState('')
+  const [composing, setComposing] = useState(false)
+  const [draftRepair, setDraftRepair] = useState('')
+  const [lines, setLines] = useState<{ description: string; quantity: string; unitPrice: string }[]>([
+    { description: '', quantity: '1', unitPrice: '' },
+  ])
+  const [labour, setLabour] = useState('')
 
   const { data, loading } = useQuery(
     async (d) => ({
@@ -88,8 +94,37 @@ export function EstimatesPage({ branchId, actorId, canDecide, canSend, customerS
     return (id: string) => map.get(id) ?? '—'
   }, [repairs])
 
+  const ELIGIBLE: string[] = ['received', 'diagnosing', 'waiting_for_approval', 'waiting_for_parts', 'approved', 'repairing', 'testing']
+  const quotable = repairs.filter((r) => ELIGIBLE.includes(r.status))
+
   const selected = estimates.find((e) => e.id === selectedId) ?? null
   const history = historyRows ?? []
+
+  const cents = (rupees: string) => {
+    const n = Number(rupees.replace(/[^0-9.]/g, ''))
+    return Number.isFinite(n) ? Math.round(n * 100) : 0
+  }
+
+  const createDraft = () => {
+    const items = lines
+      .map((l) => ({ description: l.description.trim(), quantity: Number(l.quantity), unitPrice: cents(l.unitPrice) }))
+      .filter((l) => l.description !== '')
+    if (!draftRepair) { setError('Choose the repair this estimate is for.'); return }
+    if (!items.length) { setError('An estimate needs at least one line with a description.'); return }
+    return run('Draft estimate created.', async () => {
+      await db.estimates.create({
+        repairId: draftRepair,
+        items,
+        labourCost: cents(labour),
+        taxEnabled: false,
+        actorId,
+      })
+      setComposing(false)
+      setDraftRepair('')
+      setLines([{ description: '', quantity: '1', unitPrice: '' }])
+      setLabour('')
+    })
+  }
 
   const run = async (label: string, action: () => Promise<unknown>) => {
     setBusy(true)
@@ -130,25 +165,55 @@ export function EstimatesPage({ branchId, actorId, canDecide, canSend, customerS
     )
   }
 
+  const composer = canSend ? (
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-head table-title">
+          <div><h2>New estimate</h2><p>A draft is created first; nothing reaches the customer until it is sent.</p></div>
+          <Button kind="secondary" onClick={() => { setComposing((v) => !v); setError(''); }}>{composing ? 'Close' : 'Compose'}</Button>
+        </div>
+        {composing && <>
+          <label>Repair
+            <select value={draftRepair} onChange={(e) => setDraftRepair(e.target.value)}>
+              <option value="">Choose a repair…</option>
+              {quotable.map((r) => <option key={r.id} value={r.id}>{r.jobNumber} · {r.customerName}</option>)}
+            </select>
+          </label>
+          {quotable.length === 0 && <p className="muted">No repair in this branch is at a stage where it can be quoted.</p>}
+          {lines.map((line, i) => <div className="form-grid" key={i}>
+            <label>Description<input value={line.description} onChange={(e) => setLines((prev) => prev.map((l, j) => j === i ? { ...l, description: e.target.value } : l))} placeholder="Part or service"/></label>
+            <label>Qty<input type="number" min="1" value={line.quantity} onChange={(e) => setLines((prev) => prev.map((l, j) => j === i ? { ...l, quantity: e.target.value } : l))}/></label>
+            <label>Unit price (Rs.)<input value={line.unitPrice} onChange={(e) => setLines((prev) => prev.map((l, j) => j === i ? { ...l, unitPrice: e.target.value } : l))} placeholder="0"/></label>
+            {lines.length > 1 && <Button kind="secondary" onClick={() => setLines((prev) => prev.filter((_, j) => j !== i))}>Remove</Button>}
+          </div>)}
+          <Button kind="secondary" onClick={() => setLines((prev) => [...prev, { description: '', quantity: '1', unitPrice: '' }])}>Add line</Button>
+          <label>Labour (Rs.)<input value={labour} onChange={(e) => setLabour(e.target.value)} placeholder="0"/></label>
+          <div className="form-actions"><Button onClick={createDraft} disabled={busy}>Create draft</Button></div>
+        </>}
+      </div>
+  ) : null
+
   if (loading) return <p className="muted">Loading estimates…</p>
 
   if (estimates.length === 0) {
     return (
+      <>
+      {composer}
       <div className="card empty-module">
         <Icon name="file" size={32} />
         <h2>No estimates yet</h2>
         <p>
-          Estimates are raised against a repair. Open a repair that has been
-          diagnosed and create one from there — an estimate always carries the
-          repair's customer and branch, so it cannot be filed against the wrong
-          job.
+          Estimates are raised against a repair. Use Compose above to start one —
+          an estimate always takes its customer and branch from the repair, so
+          it cannot be filed against the wrong job.
         </p>
       </div>
+      </>
     )
   }
 
   return (
     <div className="pos-layout">
+      {composer}
       <div className="card table-card">
         <div className="card-head table-title">
           <div>
