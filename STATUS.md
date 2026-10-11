@@ -3,7 +3,7 @@
 Inspection performed against the master specification. Every claim below was
 produced by a command run on this checkout, not assumed.
 
-**Branch** `arena/ccac4826-fixflow` · **HEAD** `0d43257` · app lives in
+**Branch** `arena/ccac4826-fixflow` · **HEAD** `8449161` · app lives in
 `FixFlow UI Design/` (note the space in the folder name).
 
 > Re-inspected after the repair, POS and routing work. Sections 1–3 below now
@@ -130,7 +130,7 @@ in `App.tsx`.
 
 ## 9. Tests
 
-**349 passing across 8 files** (verified with `pnpm vitest run`):
+**372 passing across 9 files** (verified with `pnpm vitest run`):
 
 | File | Tests | Covers |
 | --- | ---: | --- |
@@ -138,10 +138,11 @@ in `App.tsx`.
 | `src/utils/firebase-logic.test.ts` | 58 | framework-free finance/validation logic |
 | `src/db/business.test.ts` | 50 | branches, users, customers, devices, repairs, history |
 | `src/db/pos.test.ts` | 39 | checkout, stock integrity, idempotency, refunds, reservations |
-| `src/modules/repairs/repairView.test.ts` | 35 | persisted record → row adapter, role scoping |
+| `src/modules/repairs/repairView.test.ts` | 48 | record → row adapter, role scoping, board columns, customer progress |
 | `src/csv/pipeline.test.ts` | 30 | CSV import/export |
 | `src/app/routes.test.ts` | 23 | hash routing, route parameters |
 | `src/db/dexie.test.ts` | 18 | products and stock movements |
+| `src/modules/dashboard/figures.test.ts` | 10 | dashboard figures derived from saved records |
 
 **Still absent: component and integration tests.** No test renders a React
 component, and no §30 user journey is covered end to end. The journeys are
@@ -154,16 +155,28 @@ that is not the same as proving the screen calls them.
 
 - ~~`RepairDetails` always renders `FX-2026-004821 / Nimal Perera`~~ — now loads
   the record named by the route parameter.
-- ~~Dashboard figures come from hardcoded arrays~~ — the repair-facing screens
-  derive from saved records.
+- ~~Dashboard figures come from hardcoded arrays~~ — all KPI tiles, the role
+  dashboards and the transaction list now derive from saved records. Invented
+  figures were removed rather than kept: `Rs. 184,500`, `Rs. 326,400`,
+  `Rs. 24,800`, `Rs. 142,800`, `Rs. 84,500`, `Rs. 86,400`, `Rs. 92,500`,
+  `1.84M`, `1.52M`. Verified absent from the built bundle.
+- ~~`RepairBoard` duplicates rows via `data[i % len]`~~ — it groups by real
+  status now.
+- ~~`CustomerRepairDetails` always showed `data[0]` with a hardcoded progress
+  bar~~ — it resolves the job from the route parameter and maps the eleven
+  internal statuses onto the five customer-facing steps.
 - ~~Missing badge/priority CSS~~ — 14 `.badge.*` and 7 `.priority.*` rules now
   exist. `Badge` derives its class from the label text, so any *new* status
   label will still render unstyled until a rule is added.
 
 **Still open:**
 
-- `RepairBoard` duplicates rows via `data[i % len]`.
-- The Dashboard's KPI tiles and the Notifications screen are static.
+- The Notifications screen is still a static per-role message list.
+- The AI Diagnosis screen has no engine behind it; it renders a canned result.
+- The sales chart is an illustrative SVG curve; the card says so, and only the
+  figures beside it are real.
+- §10 cash sessions are not implemented, so the fabricated register card was
+  removed rather than left implying one exists.
 - `prefers-reduced-motion` has **0** matches in `index.css` (§29).
 - Tax is seeded as disabled but `LK_STANDARD_VAT = 18` is still hardcoded per
   product in `seed.ts` (§3).
