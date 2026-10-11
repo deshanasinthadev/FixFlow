@@ -774,11 +774,16 @@ function POS({ cart, setCart, actor }: {
 }) {
   const { db, bump } = useDb();
   const { data: posData, loading } = useQuery(
-    async (d) => ({ products: await d.products.list(), held: await d.heldSales.list(actor.branchId) }),
+    async (d) => ({
+      products: await d.products.list(),
+      held: await d.heldSales.list(actor.branchId),
+      customers: await d.customers.list(),
+    }),
     [actor.branchId],
   );
   const all = posData?.products ?? [];
   const held = posData?.held ?? [];
+  const customers = posData?.customers ?? [];
 
   const [term, setTerm] = useState("");
   const [category, setCategory] = useState("All products");
@@ -787,6 +792,9 @@ function POS({ cart, setCart, actor }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [receipt, setReceipt] = useState<{ number: string; total: number; method: string } | null>(null);
+  const [customerId, setCustomerId] = useState("");
+  const [pickingCustomer, setPickingCustomer] = useState(false);
+  const [customerTerm, setCustomerTerm] = useState("");
 
   const categories = useMemo(
     () => ["All products", ...Array.from(new Set(all.map((p) => p.category)))],
@@ -844,6 +852,8 @@ function POS({ cart, setCart, actor }: {
       await db.heldSales.hold({
         branchId: actor.branchId === "all" ? "br_colombo" : actor.branchId,
         cashierId: actor.id,
+        customerId: customerId || undefined,
+        customerName: customers.find((c) => c.id === customerId)?.fullName ?? "",
         items: lines.map((l) => ({ productId: l.product.id, quantity: l.quantity })),
         discount,
       });
@@ -862,6 +872,7 @@ function POS({ cart, setCart, actor }: {
     if (!parked) return;
     setCart(Object.fromEntries(parked.items.map((i) => [i.productId, i.quantity])));
     setDiscount(parked.discount);
+    setCustomerId(parked.customerId);
     setReceipt(null);
     await db.heldSales.discard(heldId);
     bump();
@@ -879,6 +890,7 @@ function POS({ cart, setCart, actor }: {
     try {
       const sale = await db.sales.checkout({
         branchId: actor.branchId === "all" ? "br_colombo" : actor.branchId,
+        customerId: customerId || undefined,
         lines: lines.map((l) => ({ productId: l.product.id, quantity: l.quantity })),
         discount,
         taxEnabled: false,
@@ -888,6 +900,7 @@ function POS({ cart, setCart, actor }: {
       });
       setCart({});
       setDiscount(0);
+      setCustomerId("");
       bump();
       setReceipt({ number: sale.receiptNumber, total: sale.total, method });
     } catch (err) {
@@ -900,7 +913,13 @@ function POS({ cart, setCart, actor }: {
   return <div className="pos-layout"><div className="pos-products"><div className="pos-search"><Icon name="search"/><input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Search products, SKU or scan barcode..."/><kbd>F2</kbd></div><div className="category-row">{categories.map((x) => <button className={category === x ? "active" : ""} key={x} onClick={() => setCategory(x)}>{x}</button>)}</div><div className="product-grid">{loading && <p className="muted">Loading products…</p>}
       {!loading && visible.length === 0 && <p className="muted">No products match that search.</p>}
       {visible.map((p) => <Card className="product-card" key={p.id}><div className="product-icon"><Icon name={CATEGORY_ICON[p.category] ?? "tool"} size={28}/></div><div className="stock-pill">{p.stockOnHand - p.reserved} available</div><h3>{p.name}</h3><p>{p.sku}</p><div><strong>{formatLKR(p.priceCents)}</strong><button onClick={() => change(p.id, (cart[p.id] ?? 0) + 1)}><Icon name="plus" size={17}/></button></div></Card>)}</div></div>
-    <Card className="cart-panel"><div className="cart-head"><div><h2>Current sale</h2><p>{itemCount} item{itemCount === 1 ? "" : "s"}</p></div><button className="more-btn" onClick={() => setCart({})} title="Clear the cart"><Icon name="more"/></button></div><button className="customer-add"><Icon name="users"/><span><strong>Add customer</strong><small>Optional for walk-in sales</small></span><Icon name="chevron"/></button>
+    <Card className="cart-panel"><div className="cart-head"><div><h2>Current sale</h2><p>{itemCount} item{itemCount === 1 ? "" : "s"}</p></div><button className="more-btn" onClick={() => setCart({})} title="Clear the cart"><Icon name="more"/></button></div>{customerId
+        ? <button className="customer-add" onClick={() => { setCustomerId(""); }} title="Remove the customer and sell as a walk-in"><Icon name="users"/><span><strong>{customers.find((c) => c.id === customerId)?.fullName ?? "Customer"}</strong><small>Click to sell as a walk-in instead</small></span><Icon name="check"/></button>
+        : <button className="customer-add" onClick={() => { setPickingCustomer((v) => !v); setCustomerTerm(""); }}><Icon name="users"/><span><strong>Add customer</strong><small>Optional for walk-in sales</small></span><Icon name="chevron"/></button>}
+      {pickingCustomer && !customerId && <div className="customer-picker"><div className="input"><Icon name="search"/><input autoFocus value={customerTerm} onChange={(e) => setCustomerTerm(e.target.value)} placeholder="Search name or phone"/></div>
+        {customers.filter((c) => `${c.fullName} ${c.phone}`.toLowerCase().includes(customerTerm.trim().toLowerCase())).slice(0, 6).map((c) => <button className="customer-choice" key={c.id} onClick={() => { setCustomerId(c.id); setPickingCustomer(false); }}><div className="avatar">{c.fullName.split(" ").map((x) => x[0]).join("").slice(0, 2)}</div><div><strong>{c.fullName}</strong><span>{c.phone}</span></div></button>)}
+        {customers.filter((c) => `${c.fullName} ${c.phone}`.toLowerCase().includes(customerTerm.trim().toLowerCase())).length === 0 && <p className="muted">No customer matches that search.</p>}
+      </div>}
       <div className="cart-items">{lines.length === 0 && <p className="muted">The cart is empty.</p>}
         {lines.map(({ product: p, quantity: q }) => {
           const max = p.stockOnHand - p.reserved;
