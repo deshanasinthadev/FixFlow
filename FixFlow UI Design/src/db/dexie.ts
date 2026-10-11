@@ -148,6 +148,15 @@ export function createDb(name: string = DB_NAME): Db {
     })
   }
 
+  /**
+   * Next sequence number for a repair's history. Read inside the caller's
+   * transaction so two concurrent moves cannot claim the same number.
+   */
+  async function nextHistorySeq(repairId: string): Promise<number> {
+    const existing = await raw.repairHistory.where('repairId').equals(repairId).toArray()
+    return existing.reduce((max, e) => Math.max(max, e.seq), -1) + 1
+  }
+
   const repository: Db = {
     ready() {
       seeding ??= (async () => {
@@ -484,6 +493,7 @@ export function createDb(name: string = DB_NAME): Db {
             byUserId: 'system',
             note: 'Repair job created.',
             at: now,
+            seq: await nextHistorySeq(id),
           })
         })
         return job
@@ -507,6 +517,7 @@ export function createDb(name: string = DB_NAME): Db {
             byUserId: actorId,
             note: note?.trim() || `Moved to ${REPAIR_STATUS_LABEL[to]}.`,
             at: now,
+            seq: await nextHistorySeq(id),
           })
           return updated
         })
@@ -531,6 +542,7 @@ export function createDb(name: string = DB_NAME): Db {
             byUserId: actorId,
             note: `Assigned to ${tech.fullName}.`,
             at: now,
+            seq: await nextHistorySeq(id),
           })
           return updated
         })
@@ -544,7 +556,7 @@ export function createDb(name: string = DB_NAME): Db {
         return updated
       },
 
-      history: (id) => raw.repairHistory.where('repairId').equals(id).sortBy('at'),
+      history: (id) => raw.repairHistory.where('repairId').equals(id).sortBy('seq'),
 
       async nextJobNumber(branchId: string, year = new Date().getFullYear()): Promise<string> {
         const branch = await raw.branches.get(branchId)

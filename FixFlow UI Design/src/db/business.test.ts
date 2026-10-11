@@ -254,6 +254,31 @@ describe('repairs.changeStatus', () => {
   it('throws on an unknown repair id', async () => {
     await expect(db.repairs.changeStatus('rep_ghost', 'diagnosing', 'usr_tech_1')).rejects.toThrow(/no repair/i)
   })
+
+  it('gives every history entry a strictly increasing sequence', async () => {
+    // `history()` orders by `seq`, not by `at`. Two moves landing in the same
+    // millisecond would share a timestamp, and a sort tie-break has no defined
+    // result — so an audit trail ordered by timestamp alone would be
+    // unreliable. That is why the sequence exists.
+    //
+    // A same-millisecond tie cannot be forced through the public API here:
+    // freezing the clock with fake timers breaks the promise scheduling Dexie
+    // and IndexedDB run on, and every later test cascades. So this asserts the
+    // invariant that guarantees correct order regardless of timestamps.
+    for (const job of await db.repairs.list()) {
+      const history = await db.repairs.history(job.id)
+      history.forEach((entry, i) => expect(entry.seq).toBe(i))
+    }
+  })
+
+  it('keeps history in move order after several rapid transitions', async () => {
+    await db.repairs.changeStatus(jobId, 'diagnosing', 'usr_tech_1')
+    await db.repairs.changeStatus(jobId, 'waiting_for_approval', 'usr_tech_1')
+    await db.repairs.changeStatus(jobId, 'approved', 'usr_manager')
+    const history = await db.repairs.history(jobId)
+    expect(history.map((h) => h.to)).toEqual(['received', 'diagnosing', 'waiting_for_approval', 'approved'])
+    expect(history.map((h) => h.seq)).toEqual([0, 1, 2, 3])
+  })
 })
 
 describe('repairs.assignTechnician', () => {

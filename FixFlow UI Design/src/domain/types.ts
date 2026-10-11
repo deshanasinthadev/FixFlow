@@ -176,6 +176,12 @@ export interface RepairStatusHistoryEntry {
   byUserId: ID
   note: string
   at: ISODate
+  /**
+   * Monotonic per repair. Two status changes inside the same millisecond share
+   * an `at` value, and an audit trail whose order depends on a sort tie-break
+   * is not an audit trail (§28.17).
+   */
+  seq: number
 }
 
 export interface Diagnosis {

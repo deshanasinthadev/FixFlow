@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Icon, type IconName } from "./components/Icon";
 import { ProductsPage } from "./modules/products/ProductsPage";
 import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
+import { useQuery } from "./db/store";
+import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow } from "./modules/repairs/repairView";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
 type User = {
@@ -16,11 +18,11 @@ type User = {
 };
 
 const demoUsers: Record<Role, User> = {
-  Admin: { id: "admin-1", name: "Admin Perera", email: "admin@fixflow.com", role: "Admin", branchId: "all", branch: "All branches" },
-  Manager: { id: "manager-1", name: "Kaveesha Gehan", email: "manager@fixflow.com", role: "Manager", branchId: "colombo", branch: "Colombo 03" },
-  Technician: { id: "tech-1", technicianId: "tech-1", name: "John Silva", email: "technician@fixflow.com", role: "Technician", branchId: "colombo", branch: "Colombo 03" },
-  Cashier: { id: "cashier-1", name: "Dinithi Perera", email: "cashier@fixflow.com", role: "Cashier", branchId: "colombo", branch: "Colombo 03" },
-  Customer: { id: "customer-1", customerId: "cust-1", name: "Nimal Perera", email: "customer@fixflow.com", role: "Customer", branchId: "colombo", branch: "Colombo 03" },
+  Admin: { id: "usr_admin", name: "Admin Perera", email: "admin@fixflow.com", role: "Admin", branchId: "all", branch: "All branches" },
+  Manager: { id: "usr_manager", name: "Kaveesha Gehan", email: "manager@fixflow.com", role: "Manager", branchId: "br_colombo", branch: "Colombo 03" },
+  Technician: { id: "usr_tech_1", technicianId: "usr_tech_1", name: "John Silva", email: "technician@fixflow.com", role: "Technician", branchId: "br_colombo", branch: "Colombo 03" },
+  Cashier: { id: "usr_cashier", name: "Dinithi Perera", email: "cashier@fixflow.com", role: "Cashier", branchId: "br_colombo", branch: "Colombo 03" },
+  Customer: { id: "cus_nimal", customerId: "cus_nimal", name: "Nimal Perera", email: "customer@fixflow.com", role: "Customer", branchId: "br_colombo", branch: "Colombo 03" },
 };
 
 const adminNav = [
@@ -34,13 +36,7 @@ const adminNav = [
   { label: "Administration", items: [["Notifications", "bell"], ["Branches", "branch"], ["Team", "team"], ["User Management", "users"], ["Permissions", "shield"], ["Workflow Settings", "settings"], ["Integration Settings", "settings"], ["Audit Log", "file"], ["Settings", "settings"]] },
 ] as const;
 
-const repairs = [
-  { id: "FX-2026-004821", customerId: "cust-1", technicianId: "tech-1", branchId: "colombo", customer: "Nimal Perera", device: "Dell Latitude 5420", tech: "John Silva", priority: "High", status: "In Progress", amount: "Rs. 18,500", eta: "Today, 4:30 PM" },
-  { id: "FX-2026-004820", customerId: "cust-2", technicianId: "tech-2", branchId: "colombo", customer: "Amaya Fernando", device: "iPhone 13", tech: "K. Silva", priority: "Normal", status: "Testing", amount: "Rs. 42,000", eta: "Today, 2:00 PM" },
-  { id: "FX-2026-004819", customerId: "cust-3", technicianId: "tech-1", branchId: "colombo", customer: "Kasun Silva", device: "HP Victus 15", tech: "John Silva", priority: "Urgent", status: "Awaiting Parts", amount: "Rs. 12,800", eta: "Tomorrow" },
-  { id: "FX-2026-004818", customerId: "cust-4", technicianId: "tech-3", branchId: "colombo", customer: "Tharindu Jayasinghe", device: "Samsung Galaxy S23", tech: "A. Perera", priority: "Normal", status: "Ready for Pickup", amount: "Rs. 28,500", eta: "Ready now" },
-  { id: "FX-2026-004817", customerId: "cust-5", technicianId: "tech-2", branchId: "kandy", customer: "Ruwani Dias", device: "Lenovo ThinkPad T14", tech: "K. Silva", priority: "Low", status: "Diagnosing", amount: "Rs. 6,500", eta: "Mar 22" },
-];
+
 
 const roleNav: Record<Role, ReadonlyArray<{ label: string; items: ReadonlyArray<readonly [string, string]> }>> = {
   Admin: adminNav,
@@ -64,13 +60,6 @@ const roleNav: Record<Role, ReadonlyArray<{ label: string; items: ReadonlyArray<
     { label: "Help", items: [["Notifications", "bell"], ["Support", "phone"], ["Profile", "team"]] },
   ],
 };
-
-function recordsFor(user: User) {
-  if (user.role === "Admin") return repairs;
-  if (user.role === "Customer") return repairs.filter((r) => r.customerId === user.customerId);
-  if (user.role === "Technician") return repairs.filter((r) => r.technicianId === user.technicianId);
-  return repairs.filter((r) => r.branchId === user.branchId);
-}
 
 const products = [
   { name: "65W Laptop Charger", sku: "CHR-65W-001", price: 6500, stock: 14, icon: "laptop" as IconName, cat: "Chargers" },
@@ -116,7 +105,21 @@ function App() {
   const navPages = useMemo(() => currentNav.flatMap((group) => group.items.map(([label]) => label)), [currentNav]);
   const extraPages = user?.role === "Admin" || user?.role === "Manager" ? ["Repair Details", "New Repair", "Profile"] : user?.role === "Technician" ? ["Repair Details", "Profile"] : user?.role === "Customer" ? ["My Repair Details", "Profile"] : ["Profile"];
   const allowedPages = [...navPages, ...extraPages];
-  const scopedRepairs = user ? recordsFor(user) : [];
+  // §6 — every figure on these screens derives from saved records.
+  const { data: repairData, loading: repairsLoading, error: repairsError } = useQuery(
+    async (d) => ({ jobs: await d.repairs.list(), users: await d.users.list() }),
+    [],
+  );
+  const scopedRepairs = useMemo<RepairRow[]>(() => {
+    if (!user || !repairData) return [];
+    const jobs = scopeRepairsFor(repairData.jobs, {
+      role: user.role,
+      customerId: user.customerId,
+      technicianId: user.technicianId,
+      branchId: user.branchId,
+    });
+    return toRepairRows(jobs, { technicians: technicianNames(repairData.users) });
+  }, [user, repairData]);
 
   // §2 — hash-based routing. A hash never reaches the server, so reload and
   // shared links work on any static host without a rewrite rule.
@@ -341,7 +344,7 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
   </div>;
 }
 
-function Dashboard({ navigate, data }: { navigate: (p: string) => void; data: typeof repairs }) {
+function Dashboard({ navigate, data }: { navigate: (p: string) => void; data: RepairRow[] }) {
   const kpis = [
     ["Today's Sales", "Rs. 184,500", "+12.4%", "sale", "blue"],
     ["Active Repairs", "38", "+6 today", "tool", "purple"],
@@ -396,7 +399,7 @@ function Dashboard({ navigate, data }: { navigate: (p: string) => void; data: ty
   </>;
 }
 
-function RoleDashboard({ user, data, navigate }: { user: User; data: typeof repairs; navigate: (page: string) => void }) {
+function RoleDashboard({ user, data, navigate }: { user: User; data: RepairRow[]; navigate: (page: string) => void }) {
   if (user.role === "Customer") {
     const repair = data[0];
     return <div className="customer-dashboard">
@@ -455,17 +458,17 @@ function TransactionList() {
   return <div className="transaction-list">{[["INV-2026-1024","Nimal Perera","Cash","Rs. 18,500"],["POS-2026-8842","Walk-in customer","Card","Rs. 6,500"],["INV-2026-1021","Amaya Fernando","Bank","Rs. 42,000"]].map(([id, customer, method, amount]) => <div key={id}><div className="product-mini"><Icon name="receipt"/></div><div><strong>{id}</strong><span>{customer} · {method}</span></div><strong>{amount}</strong></div>)}</div>;
 }
 
-function CustomerRepairs({ data, navigate }: { data: typeof repairs; navigate: (page: string) => void }) {
+function CustomerRepairs({ data, navigate }: { data: RepairRow[]; navigate: (page: string) => void }) {
   return <div className="portal-repairs">{data.map((repair) => <Card className="portal-repair-card" key={repair.id}><div className="device-icon"><Icon name="laptop" size={24}/></div><div className="portal-repair-main"><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Estimated completion: {repair.eta}</p></div><Button kind="secondary" onClick={() => navigate("My Repair Details")}>Track repair</Button></Card>)}</div>;
 }
 
-function CustomerRepairDetails({ data }: { data: typeof repairs }) {
+function CustomerRepairDetails({ data }: { data: RepairRow[] }) {
   const repair = data[0];
   if (!repair) return <Card className="empty-module"><Icon name="tool" size={32}/><h2>No repair found</h2><p>This account has no active repair records.</p></Card>;
   return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Your repair · Colombo 03</p></div></div><div className="repair-facts"><div><span>Estimated completion</span><strong>{repair.eta}</strong></div><div><span>Approved estimate</span><strong>{repair.amount}</strong></div></div></Card><div className="customer-detail-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Your repair journey</h2><p>Simple, customer-friendly progress updates.</p></div></div><div className="portal-progress horizontal">{["Received","Diagnosing","Repairing","Testing","Ready","Delivered"].map((item,index)=><div className={index<3?"complete":index===3?"current":""} key={item}><span>{index<3?<Icon name="check" size={14}/>:index+1}</span><strong>{item}</strong></div>)}</div><div className="customer-update"><Icon name="bell"/><div><strong>Your repair is progressing</strong><p>Our team has completed the repair work. Your device will now move to quality testing.</p><span>Updated today at 11:42 AM</span></div></div></Card><Card className="portal-actions"><h2>Repair summary</h2><div className="info-list"><div><span>Issue reported</span><strong>Overheats and shuts down</strong></div><div><span>Approved work</span><strong>Cooling service and thermal compound replacement</strong></div><div><span>Payment status</span><strong>Payment due on pickup</strong></div><div><span>Warranty</span><strong>90 days after delivery</strong></div></div><Button>Contact support</Button></Card></div></>;
 }
 
-function Repairs({ navigate, data, technician = false }: { navigate: (p: string) => void; data: typeof repairs; technician?: boolean }) {
+function Repairs({ navigate, data, technician = false }: { navigate: (p: string) => void; data: RepairRow[]; technician?: boolean }) {
   return <>
     <Card className="filter-card">
       <div className="filter-search"><Icon name="search"/><input placeholder="Search repair ID, customer or device..."/></div>
@@ -476,7 +479,7 @@ function Repairs({ navigate, data, technician = false }: { navigate: (p: string)
   </>;
 }
 
-function RepairTable({ compact = false, navigate, data, showFinancial = true }: { compact?: boolean; navigate: (p: string) => void; data: typeof repairs; showFinancial?: boolean }) {
+function RepairTable({ compact = false, navigate, data, showFinancial = true }: { compact?: boolean; navigate: (p: string) => void; data: RepairRow[]; showFinancial?: boolean }) {
   return <div className="table-wrap"><table><thead><tr><th>Repair</th><th>Customer & device</th>{!compact && <th>Technician</th>}<th>Status</th>{!compact && <th>Priority</th>}<th>{compact || !showFinancial ? "Due" : "Amount"}</th><th/></tr></thead>
     <tbody>{data.slice(0, compact ? 4 : 5).map(r => <tr key={r.id} onClick={() => navigate("Repair Details")}>
       <td><strong className="id-link">{r.id}</strong><span className="mobile-only">{r.customer}</span></td>
@@ -485,7 +488,7 @@ function RepairTable({ compact = false, navigate, data, showFinancial = true }: 
     </tr>)}</tbody></table></div>;
 }
 
-function RepairBoard({ data }: { data: typeof repairs }) {
+function RepairBoard({ data }: { data: RepairRow[] }) {
   const cols = ["Received", "Diagnosing", "Awaiting Approval", "In Progress", "Testing", "Ready for Pickup"];
   return <div className="kanban">{cols.map((col, i) => <div className="kanban-col" key={col}><div className="kanban-head"><Badge>{col}</Badge><span>{i === 3 ? 4 : i === 5 ? 3 : 2}</span></div>
     {data.length > 0 && [data[i%data.length], data[(i+2)%data.length]].map((r,j)=><Card className="repair-card" key={r.id+j}><div><strong>{r.id}</strong><span className={`priority ${r.priority.toLowerCase()}`}>{r.priority}</span></div><h3>{r.device}</h3><p>{r.customer}</p><div className="repair-card-foot"><span><Icon name="clock" size={14}/>{r.eta}</span><div className="avatar tiny">{r.tech.split(" ").map(x=>x[0]).join("")}</div></div></Card>)}
@@ -554,7 +557,7 @@ function ModulePreview({ page, user }: { page: string; user: User }) {
   return <><div className={`module-hero ${isAI?"ai-module":""}`}><div className="kpi-icon purple"><Icon name={isAI?"spark":"chart"} size={24}/></div><div><h2>{page}</h2><p>{isAI ? "Ask questions across your authorized business data and receive actionable insights." : `A connected view of your ${page.toLowerCase()} workspace.`}</p></div>{!isLimited && <Button icon="plus">{isAI ? "Ask FixFlow AI" : `New ${page.replace(/s$/,"")}`}</Button>}</div>{!isLimited && <div className="insight-grid">{insights.map(([title,body,icon])=><Card className="insight-card" key={title}><div className="kpi-icon purple"><Icon name={icon as IconName}/></div><h3>{title}</h3><p>{body}</p><button>View details <Icon name="arrow" size={14}/></button></Card>)}</div>}<Card className="empty-module"><Icon name={isAI?"brain":"settings"} size={32}/><h2>{isAI ? "Ask anything about your authorized data" : `${page} workspace`}</h2><p>{isLimited ? `This private ${user.role.toLowerCase()} view contains only records assigned to your account.` : isAI ? "Try “Which products should we reorder this week?”" : "This module is connected and ready for your team."}</p><Button>{isAI?"Start a conversation":"Explore records"}</Button></Card></>;
 }
 
-function SearchModal({ user, data, close, navigate }: { user: User; data: typeof repairs; close:()=>void; navigate:(p:string)=>void }) {
+function SearchModal({ user, data, close, navigate }: { user: User; data: RepairRow[]; close:()=>void; navigate:(p:string)=>void }) {
   const [query, setQuery] = useState("");
   const actions: Record<Role, Array<[string,string,IconName]>> = {
     Admin: [["Create new repair","New Repair","plus"],["Open point of sale","POS","cart"],["Run AI diagnosis","AI Diagnosis","brain"]],

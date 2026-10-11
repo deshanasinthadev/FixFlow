@@ -236,5 +236,6 @@ export const seedRepairHistory: RepairStatusHistoryEntry[] = seedRepairs.flatMap
     byUserId: i === 0 ? 'usr_cashier' : job.technicianId || 'usr_manager',
     note: i === 0 ? 'Device received at the counter.' : `Moved to ${to.replace(/_/g, ' ')}.`,
     at: new Date(start + i * 5 * 3_600_000).toISOString(),
+    seq: i,
   }))
 })
