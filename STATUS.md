@@ -3,7 +3,7 @@
 Inspection performed against the master specification. Every claim below was
 produced by a command run on this checkout, not assumed.
 
-**Branch** `arena/ccac4826-fixflow` · **HEAD** `07f6a09` · app lives in
+**Branch** `arena/ccac4826-fixflow` · **HEAD** `b30cad2` · app lives in
 `FixFlow UI Design/` (note the space in the folder name).
 
 > Re-inspected after the repair, POS and routing work. Sections 1–3 below now
@@ -86,7 +86,7 @@ static.
 | --- | --- |
 | Repair management (§7) | **Substantially built** — persisted jobs with validated transitions (`assertRepairTransition` in one transaction with the history entry), role-scoped listing, intake wizard that creates customer + device + job, detail screen driven by a route parameter with role-gated transition buttons. 50 repository tests + 35 view tests. Still missing: estimates, parts-on-repair, photo capture. |
 | Inventory (§11) | **Built and tested** — `src/db/`, `src/csv/`, `src/modules/products/`; CSV import/export with undo; 18 repository tests + 30 CSV tests |
-| POS (§10) | **Built and tested** — `db.sales.checkout` is one transaction: validates availability, decrements stock, writes a movement per line naming the sale, supports an idempotency key. Refunds reference the original sale and never edit it. Stock reservations added so reserved units cannot be sold twice. 39 tests. The screen sells real stock. Still missing: cash sessions, hold/park, receipt printing. |
+| POS (§10) | **Substantially built** — checkout, cash register sessions, sales history, printable receipts, refunds/returns, and held (parked) carts. 136 tests across `pos`, `cashSessions` and `heldSales`. Still missing: barcode scanning as a real input, and per-item returns. |
 | Customers / Devices (§13–14) | **Persistence built, screens absent** — `customers` and `devices` tables, seeded, with unguessable portal tokens (`ptk_<id>_<32hex>`); created through the intake wizard. No customer list or detail screen yet. |
 | Estimates & approvals (§9) | **Persistence built and tested, no UI** — full draft → sent → approved/rejected → revised lifecycle, approvals recorded as their own record (§28.13), revisions supersede rather than overwrite. `changeStatus` now refuses to start work with no recorded approval. 31 tests. The Estimates nav item is still a stub. |
 | Suppliers & purchasing (§12) | ❌ absent |
@@ -96,7 +96,7 @@ static.
 | Finance & expenses (§18) | ❌ absent |
 | Reports (§19) | ❌ absent |
 | Customer portal (§20) | ❌ absent |
-| Notifications (§21) | Screen exists, static data |
+| Notifications (§21) | **Derived from live records** — low stock, estimates awaiting decision, unassigned work, parts holds, ready-for-collection, and a technician's own queue. Empty database produces an empty panel. 16 tests. |
 | Multi-branch (§22) | **Partial** — two seeded branches, a `branches` table, and read-side scoping by role and branch. No branch transfers, no branch switcher screen. |
 | Users / audit logs (§23) | **Partial** — a `users` table seeded with 6 users across both branches, and repair status history ordered by a monotonic `seq` so the audit trail cannot be reordered by equal timestamps. No user-management screen, no general audit log. |
 | Global search (§24) | ⚠️ input exists, opens on Cmd+K, searches nothing |
@@ -130,7 +130,7 @@ in `App.tsx`.
 
 ## 9. Tests
 
-**403 passing across 10 files** (verified with `pnpm vitest run`):
+**486 passing across 14 files** (verified with `pnpm vitest run`):
 
 | File | Tests | Covers |
 | --- | ---: | --- |
@@ -138,8 +138,12 @@ in `App.tsx`.
 | `src/utils/firebase-logic.test.ts` | 58 | framework-free finance/validation logic |
 | `src/db/business.test.ts` | 50 | branches, users, customers, devices, repairs, history |
 | `src/db/estimates.test.ts` | 31 | estimates, approvals, revisions, the work-start gate |
+| `src/db/cashSessions.test.ts` | 26 | register open/close, expected cash, variance |
+| `src/db/heldSales.test.ts` | 16 | parked carts, and that holding reserves no stock |
+| `src/modules/notifications/derive.test.ts` | 16 | notifications derived from real records |
 | `src/db/pos.test.ts` | 39 | checkout, stock integrity, idempotency, refunds, reservations |
 | `src/modules/repairs/repairView.test.ts` | 48 | record → row adapter, role scoping, board columns, customer progress |
+| `src/modules/diagnosis/engine.test.ts` | 25 | rule-based diagnosis engine |
 | `src/csv/pipeline.test.ts` | 30 | CSV import/export |
 | `src/app/routes.test.ts` | 23 | hash routing, route parameters |
 | `src/db/dexie.test.ts` | 18 | products and stock movements |
@@ -172,12 +176,13 @@ that is not the same as proving the screen calls them.
 
 **Still open:**
 
-- The Notifications screen is still a static per-role message list.
-- The AI Diagnosis screen has no engine behind it; it renders a canned result.
 - The sales chart is an illustrative SVG curve; the card says so, and only the
   figures beside it are real.
-- §10 cash sessions are not implemented, so the fabricated register card was
-  removed rather than left implying one exists.
+- 34 sidebar labels still have no screen. They now say so plainly instead of
+  inventing figures and claiming to be connected.
+- There is no barcode scanner input; the POS search matches barcode text.
+- Estimates, invoices, payments, suppliers, warranties, finance, reports and
+  settings have no screens.
 - `prefers-reduced-motion` has **0** matches in `index.css` (§29).
 - Tax is seeded as disabled but `LK_STANDARD_VAT = 18` is still hardcoded per
   product in `seed.ts` (§3).
