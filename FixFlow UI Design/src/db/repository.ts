@@ -15,6 +15,7 @@ import type {
   PaymentStatus,
   PaymentMethodId,
   RepairJob,
+  RepairPartUsage,
   RepairStatus,
   RepairStatusHistoryEntry,
   Refund,
@@ -138,6 +139,17 @@ export interface Db {
     history(id: string): Promise<RepairStatusHistoryEntry[]>
     /** The next job number for a branch, e.g. FX-2026-004822. */
     nextJobNumber(branchId: string, year?: number): Promise<string>
+    /**
+     * §28.3 — consume a part on a repair.
+     *
+     * Decrements stock and writes a `repair_use` movement in one transaction,
+     * and releases the matching reservation so the same unit is not counted as
+     * both held for this job and gone from the shelf.
+     */
+    addPart(input: RepairPartInput): Promise<RepairPartUsage>
+    parts(repairId: string): Promise<RepairPartUsage[]>
+    /** Returns the part to stock, writing the reverse movement. */
+    removePart(partUsageId: string, actorId: string): Promise<void>
   }
 
   /** §10 — point of sale. */
@@ -285,6 +297,13 @@ export interface EstimateInput {
   taxEnabled?: boolean
   notes?: string
   expiresAt?: string
+  actorId: string
+}
+
+export interface RepairPartInput {
+  repairId: string
+  productId: string
+  quantity: number
   actorId: string
 }
 

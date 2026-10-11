@@ -18,6 +18,7 @@ import type {
   PaymentStatus,
   Refund,
   RepairJob,
+  RepairPartUsage,
   RepairStatus,
   RepairStatusHistoryEntry,
   Sale,
@@ -61,6 +62,7 @@ import type {
   RefundInput,
   RepairFilter,
   RepairInput,
+  RepairPartInput,
   SaleFilter,
   StockAdjust,
 } from './repository'
@@ -110,6 +112,7 @@ export function createDb(name: string = DB_NAME): Db {
     devices!: Table<Device, string>
     repairs!: Table<RepairJob, string>
     repairHistory!: Table<RepairStatusHistoryEntry, string>
+    repairParts!: Table<RepairPartUsage, string>
     sales!: Table<Sale, string>
     refunds!: Table<Refund, string>
     reservations!: Table<StockReservation, string>
@@ -162,6 +165,10 @@ export function createDb(name: string = DB_NAME): Db {
       // Version 7 adds operating expenses (§18).
       this.version(7).stores({
         expenses: 'id, branchId, category, spentAt, recordedBy',
+      })
+      // Version 8 adds parts consumed by a repair (§11, §28.3).
+      this.version(8).stores({
+        repairParts: 'id, repairId, productId, createdAt',
       })
     }
   }
@@ -780,10 +787,156 @@ export function createDb(name: string = DB_NAME): Db {
         void branch
         return `${prefix}${String(highest + 1).padStart(6, '0')}`
       },
-    },
+
+      /**
+       * §28.3 — consume a part on a repair.
+       *
+       * Stock comes off and a `repair_use` movement is written in the same
+       * transaction, so the shelf count and the ledger can never disagree about
+       * whether the part left. If a reservation exists for this repair and
+       * product, the consumed quantity is released from it at the same time:
+       * the unit is gone from the building, and leaving it counted as held
+       * would understate what is actually sellable.
+       */
+      async addPart(input: RepairPartInput): Promise<RepairPartUsage> {
+        // Validated before any rounding: rounding first would silently turn 1.5
+        // into 2 and consume a part nobody asked for.
+        if (!Number.isInteger(input.quantity) || input.quantity <= 0) {
+          throw new Error('Enter a whole number of units greater than zero.')
+        }
+        const quantity = input.quantity
+
+        return raw.transaction(
+          'rw',
+          [raw.repairParts, raw.repairs, raw.products, raw.movements, raw.reservations],
+          async () => {
+            const repair = await raw.repairs.get(input.repairId)
+            if (!repair) throw new Error(`No repair ${input.repairId}`)
+
+            const product = await raw.products.get(input.productId)
+            if (!product) throw new Error(`No product ${input.productId}`)
+            if (product.isService) throw new Error(`"${product.name}" is a service, not a part.`)
+
+            // Available, not on hand: units held for another repair are spoken
+            // for, and consuming one here would double-sell it (§28.3).
+            const available = product.stockOnHand - product.reserved
+            if (quantity > available) {
+              throw new Error(
+                `Only ${available} of "${product.name}" available — ${product.reserved} of ` +
+                  `${product.stockOnHand} on hand is reserved for other repairs.`,
+              )
+            }
+
+            const now = nowIso()
+            const usage: RepairPartUsage = {
+              id: newId('rpu'),
+              repairId: repair.id,
+              productId: product.id,
+              productName: product.name,
+              quantity,
+              unitCost: product.costCents,
+              addedBy: input.actorId,
+              createdAt: now,
+            }
+
+            // Release this repair's reservation first, so the unit leaving is
+            // the unit that was held for it rather than somebody else's.
+            const held = await raw.reservations
+              .where('repairId').equals(repair.id)
+              .filter((r) => r.productId === product.id)
+              .toArray()
+            let toRelease = quantity
+            let reservedAfter = product.reserved
+            for (const reservation of held) {
+              if (toRelease <= 0) break
+              const take = Math.min(reservation.quantity, toRelease)
+              if (take === reservation.quantity) {
+                await raw.reservations.delete(reservation.id)
+              } else {
+                await raw.reservations.update(reservation.id, { quantity: reservation.quantity - take })
+              }
+              reservedAfter -= take
+              toRelease -= take
+            }
+
+            const before = product.stockOnHand
+            const after = before - quantity
+            await raw.products.update(product.id, {
+              stockOnHand: after,
+              reserved: Math.max(0, reservedAfter),
+              updatedAt: now,
+            })
+            await raw.movements.add(
+              StockMovement.parse({
+                id: newId('mv'),
+                productId: product.id,
+                branchId: repair.branchId,
+                type: 'repair_use',
+                qty: -quantity,
+                before,
+                after,
+                reason: `Used on ${repair.jobNumber}`,
+                refId: repair.id,
+                actorId: input.actorId,
+                at: now,
+              }),
+            )
+            await raw.repairParts.add(usage)
+            return usage
+          },
+        )
+      },
+
+      async parts(repairId: string): Promise<RepairPartUsage[]> {
+        const rows = await raw.repairParts.where('repairId').equals(repairId).toArray()
+        return rows.sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1))
+      },
+
+      /**
+       * Returns a part to stock. The usage row is kept rather than deleted, so
+       * the repair still shows that the part was fitted and then taken back off
+       * — deleting it would leave a movement with no explanation.
+       */
+      async removePart(partUsageId: string, actorId: string): Promise<void> {
+        return raw.transaction(
+          'rw',
+          [raw.repairParts, raw.repairs, raw.products, raw.movements],
+          async () => {
+            const usage = await raw.repairParts.get(partUsageId)
+            if (!usage) throw new Error(`No part usage ${partUsageId}`)
+            if (usage.quantity === 0) throw new Error('That part has already been returned to stock.')
+
+            const repair = await raw.repairs.get(usage.repairId)
+            const product = await raw.products.get(usage.productId)
+            if (!product) throw new Error(`No product ${usage.productId}`)
+
+            const now = nowIso()
+            const before = product.stockOnHand
+            const after = before + usage.quantity
+            await raw.products.update(product.id, { stockOnHand: after, updatedAt: now })
+            await raw.movements.add(
+              StockMovement.parse({
+                id: newId('mv'),
+                productId: product.id,
+                branchId: repair?.branchId ?? product.branchId,
+                type: 'adjustment',
+                qty: usage.quantity,
+                before,
+                after,
+                reason: `Returned from ${repair?.jobNumber ?? usage.repairId}`,
+                refId: usage.repairId,
+                actorId,
+                at: now,
+              }),
+            )
+            await raw.repairParts.update(partUsageId, { quantity: 0 })
+          },
+        )
+      },
 
     // --- point of sale (§10) ------------------------------------------------
 
+    },
     sales: {
       async list(filter: SaleFilter = {}): Promise<Sale[]> {
         let rows = await raw.sales.toArray()
