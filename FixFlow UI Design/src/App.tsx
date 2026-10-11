@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Icon, type IconName } from "./components/Icon";
 import { ProductsPage } from "./modules/products/ProductsPage";
 import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
-import { useQuery } from "./db/store";
+import { useDb, useQuery } from "./db/store";
 import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow } from "./modules/repairs/repairView";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
@@ -246,7 +246,7 @@ function App() {
           {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs}/> : <RoleDashboard user={user} data={scopedRepairs} navigate={navigate}/>)}
           {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
           {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
-          {page === "New Repair" && <NewRepair navigate={navigate}/>}
+          {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
           {page === "Repair Details" && <RepairDetails technician={user.role === "Technician"}/>}
           {page === "My Repair Details" && <CustomerRepairDetails data={scopedRepairs}/>}
           {page === "POS" && <POS cart={cart} setCart={setCart}/>}
@@ -495,16 +495,146 @@ function RepairBoard({ data }: { data: RepairRow[] }) {
   </div>)}</div>;
 }
 
-function NewRepair({ navigate }: { navigate: (p: string) => void }) {
+function NewRepair({ navigate, actor }: { navigate: (p: string) => void; actor: User }) {
+  const { db, bump } = useDb();
+  const { data: catalogue } = useQuery(async (d) => ({
+    customers: await d.customers.list(),
+    technicians: await d.users.technicians(),
+    branches: await d.branches.list(),
+  }), []);
+
   const [step, setStep] = useState(1);
+  const [mode, setMode] = useState<"existing" | "new">("existing");
+  const [term, setTerm] = useState("");
+  const [customerId, setCustomerId] = useState("");
+  const [draft, setDraft] = useState({ fullName: "", phone: "", email: "", address: "" });
+  const [device, setDevice] = useState({ category: "laptop", brand: "", model: "", serialNumber: "" });
+  const [problem, setProblem] = useState({ issue: "", condition: "Good — minor wear", accessories: "" });
+  const [details, setDetails] = useState({ technicianId: "", priority: "normal", expectedCompletion: "", labour: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const labels = ["Customer", "Device", "Problem", "Repair details", "Review"];
+
+  const matches = useMemo(() => {
+    const needle = term.trim().toLowerCase();
+    const all = catalogue?.customers ?? [];
+    if (!needle) return all.slice(0, 5);
+    return all
+      .filter((c) => `${c.fullName} ${c.phone} ${c.email} ${c.code}`.toLowerCase().includes(needle))
+      .slice(0, 5);
+  }, [term, catalogue]);
+
+  /** Per-step validation, so a problem is caught where it was made. */
+  const stepError = (): string => {
+    if (step === 1) {
+      if (mode === "existing") return customerId ? "" : "Choose a customer first.";
+      if (draft.fullName.trim().length < 2) return "Enter the customer's full name.";
+      if (!/^\+?[0-9]{9,15}$/.test(draft.phone.replace(/[\s-]/g, ""))) return "Enter a valid phone number.";
+      return "";
+    }
+    if (step === 2) {
+      if (!device.brand.trim()) return "Enter the device brand.";
+      if (!device.model.trim()) return "Enter the device model.";
+      return "";
+    }
+    if (step === 3) {
+      if (problem.issue.trim().length < 10) return "Describe the reported issue in at least 10 characters.";
+      return "";
+    }
+    if (step === 4 && details.labour && !/^\d+(\.\d{1,2})?$/.test(details.labour)) {
+      return "Enter the labour estimate as a number of rupees.";
+    }
+    return "";
+  };
+
+  const advance = () => {
+    const problem_ = stepError();
+    if (problem_) { setError(problem_); return; }
+    setError("");
+    setStep((s) => Math.min(5, s + 1));
+  };
+
+  const submit = async () => {
+    const problem_ = stepError();
+    if (problem_) { setError(problem_); return; }
+    setBusy(true);
+    setError("");
+    try {
+      // Customer, device and repair are created in sequence: each later record
+      // needs the id of the one before it.
+      let resolvedCustomerId = customerId;
+      if (mode === "new") {
+        const created = await db.customers.create({
+          fullName: draft.fullName.trim(),
+          phone: draft.phone.trim(),
+          email: draft.email.trim(),
+          address: draft.address.trim(),
+          notes: "",
+          status: "active",
+        });
+        resolvedCustomerId = created.id;
+      }
+      const chosen = (catalogue?.customers ?? []).find((c) => c.id === resolvedCustomerId);
+      const newDevice = await db.devices.create({
+        customerId: resolvedCustomerId,
+        category: device.category as "laptop",
+        brand: device.brand.trim(),
+        model: device.model.trim(),
+        serialNumber: device.serialNumber.trim(),
+        purchaseDate: "",
+        notes: "",
+      });
+      const labourCents = details.labour ? Math.round(Number(details.labour) * 100) : 0;
+      await db.repairs.create({
+        branchId: actor.branchId === "all" ? (catalogue?.branches[0]?.id ?? "br_colombo") : actor.branchId,
+        customerId: resolvedCustomerId,
+        deviceId: newDevice.id,
+        customerName: chosen?.fullName ?? draft.fullName.trim(),
+        phone: chosen?.phone ?? draft.phone.trim(),
+        email: chosen?.email ?? draft.email.trim(),
+        deviceSummary: `${device.brand.trim()} ${device.model.trim()}`,
+        serialNumber: device.serialNumber.trim(),
+        reportedIssue: problem.issue.trim(),
+        deviceCondition: problem.condition,
+        accessoriesReceived: problem.accessories.split(",").map((a) => a.trim()).filter(Boolean),
+        intakePhotoUrls: [],
+        completionPhotoUrls: [],
+        priority: details.priority as "normal",
+        status: "received",
+        technicianId: details.technicianId,
+        receivedAt: new Date().toISOString(),
+        expectedCompletion: details.expectedCompletion || "",
+        internalNotes: "",
+        customerVisibleNotes: [],
+        labourCost: labourCents,
+      });
+      bump();
+      navigate("Repairs");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create the repair.");
+      setBusy(false);
+    }
+  };
+
+  const selectedName = mode === "new"
+    ? draft.fullName
+    : (catalogue?.customers ?? []).find((c) => c.id === customerId)?.fullName ?? "";
+  const techName = (catalogue?.technicians ?? []).find((t) => t.id === details.technicianId)?.fullName ?? "Unassigned";
+
   return <div className="form-layout"><Card className="step-card"><div className="steps">{labels.map((l,i)=><div className={step === i+1 ? "active" : step > i+1 ? "done" : ""} key={l}><span>{step > i+1 ? <Icon name="check" size={14}/> : i+1}</span><div><strong>{l}</strong><small>Step {i+1}</small></div></div>)}</div></Card>
-    <Card className="form-card"><div className="form-title"><div className="kpi-icon purple"><Icon name={step === 1 ? "users" : step === 2 ? "laptop" : "tool"}/></div><div><h2>{labels[step-1]}</h2><p>{step === 1 ? "Select an existing customer or create a new one." : "Add the information needed for this repair."}</p></div></div>
-      {step === 1 && <><div className="toggle-tabs"><button className="active">Existing customer</button><button>New customer</button></div><label>Find customer<div className="input"><Icon name="search"/><input placeholder="Search name, phone or email"/></div></label><div className="customer-choice"><div className="avatar">NP</div><div><strong>Nimal Perera</strong><span>+94 77 456 8291 · nimal@email.lk</span></div><Icon name="check"/></div></>}
-      {step === 2 && <div className="form-grid"><label>Device type<select><option>Laptop</option></select></label><label>Brand<select><option>Dell</option></select></label><label>Model<input defaultValue="Latitude 5420"/></label><label>Serial number<input placeholder="Enter serial / IMEI"/></label></div>}
-      {step === 3 && <><label>Customer complaint<textarea defaultValue="Device overheats and shuts down after 20–30 minutes of use."/></label><div className="form-grid"><label>Device condition<select><option>Good — minor wear</option></select></label><label>Accessories received<input defaultValue="65W charger, laptop bag"/></label></div></>}
-      {step >= 4 && <div className="form-grid"><label>Assign technician<select><option>D. Fernando</option></select></label><label>Priority<select><option>High</option></select></label><label>Estimated completion<input defaultValue="March 20, 2026"/></label><label>Initial estimate<input defaultValue="Rs. 18,500"/></label></div>}
-      <div className="form-actions"><Button kind="secondary" onClick={() => step > 1 && setStep(step-1)}>Back</Button><Button onClick={() => step < 5 ? setStep(step+1) : navigate("Repair Details")}>{step === 5 ? "Create repair" : "Continue"} <Icon name="arrow" size={15}/></Button></div>
+    <Card className="form-card"><div className="form-title"><div className="kpi-icon purple"><Icon name={step === 1 ? "users" : step === 2 ? "laptop" : "tool"}/></div><div><h2>{labels[step-1]}</h2><p>{step === 1 ? "Select an existing customer or create a new one." : step === 5 ? "Check the details, then create the repair job." : "Add the information needed for this repair."}</p></div></div>
+      {step === 1 && <><div className="toggle-tabs"><button className={mode === "existing" ? "active" : ""} onClick={() => setMode("existing")}>Existing customer</button><button className={mode === "new" ? "active" : ""} onClick={() => setMode("new")}>New customer</button></div>
+        {mode === "existing"
+          ? <><label>Find customer<div className="input"><Icon name="search"/><input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Search name, phone or email"/></div></label>
+              {matches.length === 0 && <p className="muted">No customer matches that search.</p>}
+              {matches.map((c) => <button className="customer-choice" key={c.id} onClick={() => setCustomerId(c.id)} style={{ width: "100%", textAlign: "left" }}><div className="avatar">{c.fullName.split(" ").map((x) => x[0]).join("").slice(0,2)}</div><div><strong>{c.fullName}</strong><span>{c.phone}{c.email ? ` · ${c.email}` : ""}</span></div>{customerId === c.id && <Icon name="check"/>}</button>)}</>
+          : <div className="form-grid"><label>Full name<input value={draft.fullName} onChange={(e) => setDraft({ ...draft, fullName: e.target.value })} placeholder="Nimal Perera"/></label><label>Phone<input value={draft.phone} onChange={(e) => setDraft({ ...draft, phone: e.target.value })} placeholder="+94 77 123 4567"/></label><label>Email<input value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })} placeholder="optional"/></label><label>Address<input value={draft.address} onChange={(e) => setDraft({ ...draft, address: e.target.value })} placeholder="optional"/></label></div>}</>}
+      {step === 2 && <div className="form-grid"><label>Device type<select value={device.category} onChange={(e) => setDevice({ ...device, category: e.target.value })}>{["laptop","desktop","mobile","tablet","other"].map((c) => <option key={c} value={c}>{c[0].toUpperCase() + c.slice(1)}</option>)}</select></label><label>Brand<input value={device.brand} onChange={(e) => setDevice({ ...device, brand: e.target.value })} placeholder="Dell"/></label><label>Model<input value={device.model} onChange={(e) => setDevice({ ...device, model: e.target.value })} placeholder="Latitude 5420"/></label><label>Serial number<input value={device.serialNumber} onChange={(e) => setDevice({ ...device, serialNumber: e.target.value })} placeholder="Enter serial / IMEI"/></label></div>}
+      {step === 3 && <><label>Customer complaint<textarea value={problem.issue} onChange={(e) => setProblem({ ...problem, issue: e.target.value })} placeholder="Describe what the customer reported."/></label><div className="form-grid"><label>Device condition<select value={problem.condition} onChange={(e) => setProblem({ ...problem, condition: e.target.value })}>{["Good — minor wear","Fair — visible damage","Poor — major damage"].map((c) => <option key={c}>{c}</option>)}</select></label><label>Accessories received<input value={problem.accessories} onChange={(e) => setProblem({ ...problem, accessories: e.target.value })} placeholder="65W charger, laptop bag"/></label></div></>}
+      {step === 4 && <div className="form-grid"><label>Assign technician<select value={details.technicianId} onChange={(e) => setDetails({ ...details, technicianId: e.target.value })}><option value="">Unassigned</option>{(catalogue?.technicians ?? []).map((t) => <option key={t.id} value={t.id}>{t.fullName}</option>)}</select></label><label>Priority<select value={details.priority} onChange={(e) => setDetails({ ...details, priority: e.target.value })}>{["low","normal","high","urgent"].map((p) => <option key={p} value={p}>{p[0].toUpperCase() + p.slice(1)}</option>)}</select></label><label>Expected completion<input type="date" value={details.expectedCompletion} onChange={(e) => setDetails({ ...details, expectedCompletion: e.target.value })}/></label><label>Labour estimate (Rs.)<input value={details.labour} onChange={(e) => setDetails({ ...details, labour: e.target.value })} placeholder="0.00"/></label></div>}
+      {step === 5 && <div className="info-list"><div><span>Customer</span><strong>{selectedName || "—"}</strong></div><div><span>Device</span><strong>{device.brand && device.model ? `${device.brand} ${device.model}` : "—"}</strong></div><div><span>Serial number</span><strong>{device.serialNumber || "—"}</strong></div><div><span>Reported issue</span><strong>{problem.issue || "—"}</strong></div><div><span>Technician</span><strong>{techName}</strong></div><div><span>Priority</span><strong>{details.priority[0].toUpperCase() + details.priority.slice(1)}</strong></div></div>}
+      {error && <p className="danger-text" role="alert">{error}</p>}
+      <div className="form-actions"><Button kind="secondary" onClick={() => { setError(""); step > 1 && setStep(step-1); }}>Back</Button><Button onClick={step < 5 ? advance : submit}>{busy ? "Creating…" : step === 5 ? "Create repair" : "Continue"} <Icon name="arrow" size={15}/></Button></div>
     </Card></div>;
 }
 

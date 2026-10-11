@@ -89,6 +89,101 @@ describe('seeded repair history', () => {
 // ---------------------------------------------------------------------------
 // Listing and filtering
 // ---------------------------------------------------------------------------
+describe('repair intake flow (§7)', () => {
+  it('creates customer, device and job in the order the wizard does', async () => {
+    // Mirrors NewRepair.submit(): each record needs the id of the one before.
+    const customer = await db.customers.create({
+      fullName: 'Ishara Gunawardena',
+      phone: '+94772223344',
+      email: 'ishara@example.com',
+      address: '5 Kandy Road',
+      notes: '',
+      status: 'active',
+    })
+    const device = await db.devices.create({
+      customerId: customer.id,
+      category: 'laptop',
+      brand: 'Acer',
+      model: 'Aspire 5',
+      serialNumber: 'ACR5X9',
+      purchaseDate: '',
+      notes: '',
+    })
+    const job = await db.repairs.create({
+      branchId: 'br_colombo',
+      customerId: customer.id,
+      deviceId: device.id,
+      customerName: customer.fullName,
+      phone: customer.phone,
+      email: customer.email,
+      deviceSummary: `${device.brand} ${device.model}`,
+      serialNumber: device.serialNumber,
+      reportedIssue: 'Hinge is loose and the lid will not stay open.',
+      deviceCondition: 'Fair — visible damage',
+      accessoriesReceived: ['Charger'],
+      intakePhotoUrls: [],
+      completionPhotoUrls: [],
+      priority: 'normal',
+      status: 'received',
+      technicianId: '',
+      receivedAt: new Date().toISOString(),
+      expectedCompletion: '',
+      internalNotes: '',
+      customerVisibleNotes: [],
+      labourCost: 3500_00,
+    })
+
+    expect(job.jobNumber).toMatch(/^FX-\d{4}-\d{6}$/)
+    expect(job.status).toBe('received')
+    expect(job.labourCost).toBe(350000)
+
+    // The new job is reachable through the same scoping the UI uses.
+    const mine = await db.repairs.list({ customerId: customer.id })
+    expect(mine).toHaveLength(1)
+    expect(mine[0].id).toBe(job.id)
+
+    // The device is linked to the customer.
+    expect(await db.devices.forCustomer(customer.id)).toHaveLength(1)
+
+    // And the job opened with an audit entry.
+    expect(await db.repairs.history(job.id)).toHaveLength(1)
+  })
+
+  it('files an intake against the branch the actor belongs to', async () => {
+    const before = await db.repairs.list({ branchId: 'br_kandy' })
+    const customer = await db.customers.create({
+      fullName: 'Kandy Walk In', phone: '+94778889900', email: '', address: '', notes: '', status: 'active',
+    })
+    const device = await db.devices.create({
+      customerId: customer.id, category: 'mobile', brand: 'Xiaomi', model: 'Redmi Note 12',
+      serialNumber: 'XM12K', purchaseDate: '', notes: '',
+    })
+    await db.repairs.create({
+      branchId: 'br_kandy', customerId: customer.id, deviceId: device.id,
+      customerName: customer.fullName, phone: customer.phone, email: '',
+      deviceSummary: 'Xiaomi Redmi Note 12', serialNumber: 'XM12K',
+      reportedIssue: 'Screen does not respond to touch in the lower half.',
+      deviceCondition: 'Good — minor wear', accessoriesReceived: [], intakePhotoUrls: [],
+      completionPhotoUrls: [], priority: 'high', status: 'received', technicianId: '',
+      receivedAt: new Date().toISOString(), expectedCompletion: '', internalNotes: '',
+      customerVisibleNotes: [], labourCost: 0,
+    })
+    const after = await db.repairs.list({ branchId: 'br_kandy' })
+    expect(after).toHaveLength(before.length + 1)
+  })
+
+  it('does not create a repair when the device create fails', async () => {
+    const before = await db.repairs.list()
+    await expect(
+      db.devices.create({
+        customerId: 'cus_nimal', category: 'laptop', brand: '', model: '',
+        serialNumber: '', purchaseDate: '', notes: '',
+      }),
+    ).rejects.toThrow()
+    expect(await db.repairs.list()).toHaveLength(before.length)
+  })
+})
+
 describe('repairs.list filters', () => {
   it('filters by status', async () => {
     const repairing = await db.repairs.list({ status: 'repairing' })
