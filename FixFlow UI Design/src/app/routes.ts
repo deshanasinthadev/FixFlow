@@ -15,6 +15,12 @@ export interface RouteTarget {
   role: string
   /** The page label, e.g. "Repair Details". */
   page: string
+  /**
+   * Optional record identifier, e.g. a job number. Detail pages need it to load
+   * one record; collection pages leave it empty. Kept as the last path segment
+   * so `#/admin/repair-details/FX-2026-004821` still reloads and shares cleanly.
+   */
+  param: string
 }
 
 /** The route shown when nobody is signed in. */
@@ -31,9 +37,11 @@ export const deslugify = (slug: string): string =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
 
-/** Builds `#/admin/repair-details`. */
-export const buildHash = (role: string, page: string): string =>
-  `#/${role.toLowerCase()}/${slugify(page)}`
+/** Builds `#/admin/repair-details`, or `.../repair-details/FX-2026-004821`. */
+export const buildHash = (role: string, page: string, param = ''): string => {
+  const base = `#/${role.toLowerCase()}/${slugify(page)}`
+  return param ? `${base}/${encodeURIComponent(param)}` : base
+}
 
 /**
  * Parses a hash into a route target.
@@ -48,15 +56,18 @@ export const parseHash = (raw: string): RouteTarget | null => {
   if (!path) return null
   const segments = path.split('/').filter(Boolean)
   if (!segments.length) return null
-  if (segments[0] === 'login') return { role: 'login', page: 'Login' }
+  if (segments[0] === 'login') return { role: 'login', page: 'Login', param: '' }
   if (segments.length < 2) return null
-  const [role, ...rest] = segments
-  return { role, page: deslugify(rest.join('-')) }
+  const [role, pageSlug, ...rest] = segments
+  // Anything after the page slug is the record identifier. Joined back with
+  // '/' and decoded so a job number or id survives the round trip.
+  const param = rest.length ? decodeURIComponent(rest.join('/')) : ''
+  return { role, page: deslugify(pageSlug), param }
 }
 
 /** Round-trips a route target through the hash format. */
 export const formatRoute = (target: RouteTarget): string =>
-  target.role === 'login' ? LOGIN_HASH : buildHash(target.role, target.page)
+  target.role === 'login' ? LOGIN_HASH : buildHash(target.role, target.page, target.param)
 
 /** Reads the current route from the browser. */
 export const readHash = (): RouteTarget | null => parseHash(window.location.hash)

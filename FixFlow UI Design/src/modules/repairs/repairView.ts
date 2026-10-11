@@ -124,6 +124,23 @@ export const technicianNames = (users: User[]): Record<string, string> => {
  * read-side filter — `domain/permissions.ts` remains the authority for what a
  * role may *do*.
  */
+/**
+ * The UI stores roles in display case ("Technician"); the domain layer uses
+ * lowercase. Permission checks live in domain/permissions.ts, so anything
+ * calling them needs this mapping rather than a second, drifting copy of the
+ * role list.
+ */
+export const toDomainRole = (uiRole: string): 'admin' | 'manager' | 'technician' | 'cashier' | 'customer' => {
+  switch (uiRole) {
+    case 'Admin': return 'admin'
+    case 'Manager': return 'manager'
+    case 'Technician': return 'technician'
+    case 'Cashier': return 'cashier'
+    case 'Customer': return 'customer'
+    default: return 'customer'
+  }
+}
+
 export const scopeRepairsFor = (
   jobs: RepairJob[],
   viewer: { role: string; customerId?: string; technicianId?: string; branchId?: string },

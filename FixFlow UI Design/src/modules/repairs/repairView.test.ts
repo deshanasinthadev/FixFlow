@@ -1,17 +1,8 @@
+import { mayPerformRepairTransition } from '../../domain/workflows'
 import { describe, expect, it } from 'vitest'
 import type { RepairJob, RepairStatus, User } from '../../domain/types'
 import { REPAIR_STATUSES } from '../../domain/types'
-import {
-  PRIORITY_LABEL,
-  STATUS_LABEL,
-  countRepairs,
-  formatEta,
-  scopeRepairsFor,
-  statusBadgeTone,
-  technicianNames,
-  toRepairRow,
-  toRepairRows,
-} from './repairView'
+import { PRIORITY_LABEL, STATUS_LABEL, countRepairs, formatEta, scopeRepairsFor, statusBadgeTone, technicianNames, toRepairRow, toRepairRows, toDomainRole } from './repairView'
 
 /**
  * The adapter between persisted RepairJob records and the row shape the
@@ -246,5 +237,30 @@ describe('toRepairRows', () => {
 
   it('returns an empty list for no jobs', () => {
     expect(toRepairRows([], ctx)).toEqual([])
+  })
+})
+
+describe('toDomainRole', () => {
+  it.each([
+    ['Admin', 'admin'],
+    ['Manager', 'manager'],
+    ['Technician', 'technician'],
+    ['Cashier', 'cashier'],
+    ['Customer', 'customer'],
+  ] as const)('maps %s to %s', (ui, domain) => {
+    expect(toDomainRole(ui)).toBe(domain)
+  })
+
+  it('falls back to the least privileged role for anything unrecognised', () => {
+    // Deliberate: an unknown role must not silently gain permission.
+    expect(toDomainRole('Superuser')).toBe('customer')
+    expect(toDomainRole('')).toBe('customer')
+  })
+
+  it('produces a role the workflow layer will accept', () => {
+    // The point of the mapping: permissions.ts rejects anything else.
+    const role = toDomainRole('Technician')
+    expect(mayPerformRepairTransition(role, 'received', 'diagnosing').allowed).toBe(true)
+    expect(mayPerformRepairTransition(role, 'testing', 'delivered').allowed).toBe(false)
   })
 })

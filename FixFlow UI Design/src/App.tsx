@@ -5,8 +5,10 @@ import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
 import { useDb, useQuery } from "./db/store";
 import { computeDocument } from "./domain/calculations";
 import { formatLKR } from "./lib/format";
+import { nextRepairStatuses, mayPerformRepairTransition } from "./domain/workflows";
+import type { RepairStatus } from "./domain/types";
 import type { Product } from "./db/schema";
-import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow } from "./modules/repairs/repairView";
+import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole } from "./modules/repairs/repairView";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
 type User = {
@@ -96,6 +98,8 @@ function App() {
     }
   });
   const [page, setPage] = useState("Dashboard");
+  /** Record identifier from the hash, e.g. a job number. Detail pages only. */
+  const [param, setParam] = useState("");
   const [dark, setDark] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -126,16 +130,18 @@ function App() {
 
   // §2 — hash-based routing. A hash never reaches the server, so reload and
   // shared links work on any static host without a rewrite rule.
-  const routeFor = (to: string, activeUser = user) =>
-    activeUser ? buildHash(activeUser.role, to) : LOGIN_HASH;
-  const navigate = (to: string) => {
+  const routeFor = (to: string, activeUser = user, nextParam = "") =>
+    activeUser ? buildHash(activeUser.role, to, nextParam) : LOGIN_HASH;
+  const navigate = (to: string, nextParam = "") => {
     if (!user || ![...allowedPages, "Dashboard"].includes(to)) {
       to = "Dashboard";
+      nextParam = "";
     }
     setPage(to);
+    setParam(nextParam);
     setMobileNav(false);
     setProfileOpen(false);
-    writeHash(routeFor(to));
+    writeHash(routeFor(to, user, nextParam));
   };
   const login = (nextUser: User, remember: boolean) => {
     setUser(nextUser);
@@ -169,6 +175,7 @@ function App() {
       const target = readHash();
       if (target && target.role !== "login" && [...allowedPages, "Dashboard"].includes(target.page)) {
         if (target.page !== page) setPage(target.page);
+        if (target.param !== param) setParam(target.param);
         return;
       }
       writeHash(routeFor(page), true);
@@ -250,7 +257,7 @@ function App() {
           {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
           {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
           {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
-          {page === "Repair Details" && <RepairDetails technician={user.role === "Technician"}/>}
+          {page === "Repair Details" && <RepairDetails jobNumber={param} technician={user.role === "Technician"} actor={user} navigate={navigate}/>}
           {page === "My Repair Details" && <CustomerRepairDetails data={scopedRepairs}/>}
           {page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
           {(page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
@@ -641,17 +648,71 @@ function NewRepair({ navigate, actor }: { navigate: (p: string) => void; actor: 
     </Card></div>;
 }
 
-function RepairDetails({ technician = false }: { technician?: boolean }) {
+function RepairDetails({ jobNumber, technician = false, actor, navigate }: {
+  jobNumber: string;
+  technician?: boolean;
+  actor: User;
+  navigate: (to: string, param?: string) => void;
+}) {
+  const { db, bump } = useDb();
+  const { data, loading } = useQuery(
+    async (d) => ({ jobs: await d.repairs.list(), users: await d.users.list() }),
+    [],
+  );
   const [tab, setTab] = useState("Overview");
-  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>FX-2026-004821</span><Badge>In Progress</Badge></div><h2>Dell Latitude 5420</h2><p>Nimal Perera · High priority</p></div></div><div className="repair-facts"><div><span>Technician</span><strong>John Silva</strong></div><div><span>Estimated completion</span><strong>Today, 4:30 PM</strong></div>{!technician && <div><span>Current total</span><strong>Rs. 18,500</strong></div>}</div></Card>
-    <div className="tabs">{(technician ? ["Overview","Diagnosis","Parts","Activities","Testing","Warranty"] : ["Overview","Diagnosis","Estimate","Parts","Activities","Testing","Invoice","Warranty"]).map(x=><button className={tab===x?"active":""} onClick={()=>setTab(x)} key={x}>{x}</button>)}</div>
-    <div className="detail-grid"><Card><div className="card-head"><div><h2>{tab === "Overview" ? "Repair workflow" : tab}</h2><p>Connected repair record and activity</p></div><Button kind="secondary">Update</Button></div>
-      <div className="timeline">{["Received","Diagnosing","Approved","Repairing","Testing","Ready","Delivered"].map((x,i)=><div className={i<4?"complete":i===4?"current":""} key={x}><span>{i<4?<Icon name="check" size={13}/>:i+1}</span><small>{x}</small></div>)}</div>
-      <div className="note-box"><div className="kpi-icon purple"><Icon name="tool"/></div><div><strong>Technician update</strong><p>Cooling system cleaned and thermal paste replaced. Running stress tests before final quality check.</p><span>Today at 11:42 AM · D. Fernando</span></div></div>
-    </Card><Card className="customer-panel"><h2>Customer & device</h2><div className="customer-line"><div className="avatar">NP</div><div><strong>Nimal Perera</strong><span>+94 77 456 8291</span></div></div><hr/><div className="info-list"><div><span>Serial number</span><strong>DL5420-78X2</strong></div><div><span>Complaint</span><strong>Overheats and shuts down</strong></div><div><span>Accessories</span><strong>Charger, laptop bag</strong></div></div><Button kind="secondary">Contact customer</Button></Card></div>
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const repair = useMemo(
+    () => (data?.jobs ?? []).find((r) => r.jobNumber === jobNumber),
+    [data, jobNumber],
+  );
+  const techs = useMemo(() => technicianNames(data?.users ?? []), [data]);
+  const { data: history } = useQuery(
+    async (d) => (repair ? await d.repairs.history(repair.id) : []),
+    [repair?.id ?? ""],
+  );
+
+  if (loading) return <Card><p className="muted">Loading repair…</p></Card>;
+  if (!repair) {
+    return <Card><h2>Repair not found</h2><p className="danger-text" role="alert">No repair matches {jobNumber ? `"${jobNumber}"` : "that reference"}.</p><Button kind="secondary" onClick={() => navigate("Repairs")}>Back to repairs</Button></Card>;
+  }
+
+  /** §28.10 — only the moves the workflow and this role actually permit. */
+  const moves = nextRepairStatuses(repair.status).map((to) => ({
+    to,
+    ...mayPerformRepairTransition(toDomainRole(actor.role), repair.status, to),
+  }));
+
+  const moveTo = async (to: RepairStatus) => {
+    setBusy(true);
+    setError("");
+    try {
+      await db.repairs.changeStatus(repair.id, to, actor.id);
+      bump();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update the status.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const tabs = technician
+    ? ["Overview", "Diagnosis", "Parts", "Activities", "Testing", "Warranty"]
+    : ["Overview", "Diagnosis", "Estimate", "Parts", "Activities", "Testing", "Invoice", "Warranty"];
+  const trail = history ?? [];
+  const currentIndex = trail.length ? trail.length - 1 : 0;
+
+  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.jobNumber}</span><Badge>{STATUS_LABEL[repair.status]}</Badge></div><h2>{repair.deviceSummary}</h2><p>{repair.customerName} · {PRIORITY_LABEL[repair.priority]} priority</p></div></div><div className="repair-facts"><div><span>Technician</span><strong>{techs[repair.technicianId] ?? "Unassigned"}</strong></div><div><span>Estimated completion</span><strong>{formatEta(repair)}</strong></div>{!technician && <div><span>Labour so far</span><strong>{formatLKR(repair.labourCost)}</strong></div>}</div></Card>
+    <div className="tabs">{tabs.map((x) => <button className={tab === x ? "active" : ""} onClick={() => setTab(x)} key={x}>{x}</button>)}</div>
+    <div className="detail-grid"><Card><div className="card-head"><div><h2>{tab === "Overview" ? "Repair workflow" : tab}</h2><p>Connected repair record and activity</p></div></div>
+      <div className="timeline">{trail.length === 0 && <p className="muted">No status history yet.</p>}
+        {trail.map((entry, i) => <div className={i < currentIndex ? "complete" : "current"} key={`${entry.seq}-${entry.at}`}><span>{i < currentIndex ? <Icon name="check" size={13}/> : i + 1}</span><small>{STATUS_LABEL[entry.to] ?? entry.to}</small></div>)}</div>
+      {moves.length > 0 && <><h3>Move this repair on</h3><div className="payment-methods">{moves.map((m) => <button key={m.to} className={m.allowed ? "active" : ""} disabled={!m.allowed || busy} title={m.allowed ? "" : m.reason} onClick={() => moveTo(m.to)}>{STATUS_LABEL[m.to] ?? m.to}</button>)}</div></>}
+      {error && <p className="danger-text" role="alert">{error}</p>}
+    </Card><Card className="customer-panel"><h2>Customer & device</h2><div className="customer-line"><div className="avatar">{repair.customerName.split(" ").map((x) => x[0]).join("").slice(0, 2)}</div><div><strong>{repair.customerName}</strong><span>{repair.phone}</span></div></div><hr/><div className="info-list"><div><span>Serial number</span><strong>{repair.serialNumber || "—"}</strong></div><div><span>Complaint</span><strong>{repair.reportedIssue}</strong></div><div><span>Accessories</span><strong>{repair.accessoriesReceived.length ? repair.accessoriesReceived.join(", ") : "None"}</strong></div></div></Card></div>
   </>;
 }
-
 const CATEGORY_ICON: Record<string, IconName> = {
   Accessories: "tool", Chargers: "tool", Cables: "tool", "Spare Parts": "tool", Services: "tool",
 };
