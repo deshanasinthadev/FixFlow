@@ -1,5 +1,6 @@
 import type {
   Branch,
+  CashSession,
   Customer,
   CustomerApproval,
   Device,
@@ -175,6 +176,23 @@ export interface Db {
     nextEstimateNumber(branchId: string, year?: number): Promise<string>
   }
 
+  /** §10 — cash register sessions: open with a float, close against a count. */
+  cashSessions: {
+    list(filter?: { branchId?: string; status?: 'open' | 'closed' }): Promise<CashSession[]>
+    get(id: string): Promise<CashSession | undefined>
+    /** The open session for a branch, if there is one. */
+    current(branchId: string): Promise<CashSession | undefined>
+    open(input: OpenCashSessionInput): Promise<CashSession>
+    /**
+     * Records the counted drawer, stores the expected figure alongside it, and
+     * closes. The variance is not stored — it is derived, so it can never
+     * disagree with the two numbers it comes from.
+     */
+    close(id: string, input: CloseCashSessionInput): Promise<CashSession>
+    /** Opening float + cash sales − cash refunds since the session opened. */
+    expectedCash(id: string): Promise<number>
+  }
+
   approvals: {
     forEstimate(estimateId: string): Promise<CustomerApproval[]>
     forRepair(repairId: string): Promise<CustomerApproval[]>
@@ -194,6 +212,21 @@ export interface EstimateInput {
   notes?: string
   expiresAt?: string
   actorId: string
+}
+
+export interface OpenCashSessionInput {
+  branchId: string
+  cashierId: string
+  /** Minor units placed in the drawer at open. */
+  openingBalance: number
+  note?: string
+}
+
+export interface CloseCashSessionInput {
+  /** Minor units physically counted in the drawer. */
+  countedCash: number
+  cashierId: string
+  note?: string
 }
 
 export interface ApprovalInput {

@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import type {
   Branch,
+  CashSession,
   Customer,
   CustomerApproval,
   Device,
@@ -28,8 +29,10 @@ import {
 import type {
   ApprovalInput,
   CheckoutInput,
+  CloseCashSessionInput,
   CustomerInput,
   EstimateInput,
+  OpenCashSessionInput,
   Db,
   DeviceInput,
   DuplicateStrategy,
@@ -92,6 +95,7 @@ export function createDb(name: string = DB_NAME): Db {
     reservations!: Table<StockReservation, string>
     estimates!: Table<Estimate, string>
     approvals!: Table<CustomerApproval, string>
+    cashSessions!: Table<CashSession, string>
 
     constructor() {
       super(name)
@@ -117,6 +121,10 @@ export function createDb(name: string = DB_NAME): Db {
       this.version(3).stores({
         estimates: 'id, estimateNumber, repairId, customerId, branchId, status, createdAt',
         approvals: 'id, estimateId, repairId, at',
+      })
+      // Version 4 adds cash register sessions (§10).
+      this.version(4).stores({
+        cashSessions: 'id, branchId, cashierId, openedAt, closedAt',
       })
     }
   }
@@ -1064,6 +1072,124 @@ export function createDb(name: string = DB_NAME): Db {
       },
 
       nextEstimateNumber,
+    },
+
+    // --- cash sessions (§10) -----------------------------------------------
+
+    cashSessions: {
+      async list(filter: { branchId?: string; status?: 'open' | 'closed' } = {}) {
+        let rows = await raw.cashSessions.toArray()
+        if (filter.branchId) rows = rows.filter((s) => s.branchId === filter.branchId)
+        if (filter.status === 'open') rows = rows.filter((s) => s.closedAt === '')
+        if (filter.status === 'closed') rows = rows.filter((s) => s.closedAt !== '')
+        return rows.sort((a, b) => (a.openedAt < b.openedAt ? 1 : -1))
+      },
+
+      get: (id) => raw.cashSessions.get(id),
+
+      current: (branchId) =>
+        raw.cashSessions
+          .where('branchId')
+          .equals(branchId)
+          .filter((s) => s.closedAt === '')
+          .first(),
+
+      async open(input: OpenCashSessionInput): Promise<CashSession> {
+        const opening = Math.round(input.openingBalance)
+        if (!Number.isFinite(opening) || opening < 0) {
+          throw new Error('The opening float cannot be negative.')
+        }
+        return raw.transaction('rw', [raw.cashSessions, raw.branches, raw.users], async () => {
+          const branch = await raw.branches.get(input.branchId)
+          if (!branch) throw new Error(`Unknown branch ${input.branchId}`)
+          const cashier = await raw.users.get(input.cashierId)
+          if (!cashier) throw new Error(`Unknown cashier ${input.cashierId}`)
+
+          // One open drawer per branch. Two open sessions would make "expected
+          // cash" ambiguous, which is exactly the inconsistency §28.15 forbids.
+          const alreadyOpen = await raw.cashSessions
+            .where('branchId')
+            .equals(input.branchId)
+            .filter((s) => s.closedAt === '')
+            .first()
+          if (alreadyOpen) {
+            throw new Error('A cash session is already open at this branch. Close it first.')
+          }
+
+          const session: CashSession = {
+            id: newId('csh'),
+            branchId: input.branchId,
+            cashierId: input.cashierId,
+            openingBalance: opening,
+            closingBalance: null,
+            expectedClosingBalance: null,
+            note: input.note?.trim() ?? '',
+            openedAt: nowIso(),
+            closedAt: '',
+          }
+          await raw.cashSessions.add(session)
+          return session
+        })
+      },
+
+      async expectedCash(id: string): Promise<number> {
+        const session = await raw.cashSessions.get(id)
+        if (!session) throw new Error(`No cash session ${id}`)
+
+        const openedAt = new Date(session.openedAt).getTime()
+        const closedAt = session.closedAt ? new Date(session.closedAt).getTime() : Number.POSITIVE_INFINITY
+
+        const inWindow = (iso: string) => {
+          const at = new Date(iso).getTime()
+          return !Number.isNaN(at) && at >= openedAt && at <= closedAt
+        }
+
+        const sales = await raw.sales.where('branchId').equals(session.branchId).toArray()
+        const cashIn = sales
+          .filter((sale) => sale.paymentMethod === 'cash' && inWindow(sale.createdAt))
+          .reduce((sum, sale) => sum + sale.amountPaid, 0)
+
+        const refunds = await raw.refunds.toArray()
+        const saleById = new Map(sales.map((sale) => [sale.id, sale]))
+        const cashOut = refunds
+          .filter((refund) => {
+            const sale = saleById.get(refund.originalSaleId)
+            return sale?.paymentMethod === 'cash' && inWindow(refund.createdAt)
+          })
+          .reduce((sum, refund) => sum + refund.amount, 0)
+
+        return session.openingBalance + cashIn - cashOut
+      },
+
+      async close(id: string, input: CloseCashSessionInput): Promise<CashSession> {
+        const counted = Math.round(input.countedCash)
+        if (!Number.isFinite(counted) || counted < 0) {
+          throw new Error('The counted cash cannot be negative.')
+        }
+        return raw.transaction(
+          // expectedCash reads sales and refunds, so both must be in scope or
+          // IndexedDB rejects the object store lookup.
+          'rw',
+          [raw.cashSessions, raw.sales, raw.refunds],
+          async () => {
+          const session = await raw.cashSessions.get(id)
+          if (!session) throw new Error(`No cash session ${id}`)
+          if (session.closedAt !== '') {
+            throw new Error('That cash session is already closed.')
+          }
+          const expected = await repository.cashSessions.expectedCash(id)
+          const closed: CashSession = {
+            ...session,
+            closingBalance: counted,
+            expectedClosingBalance: expected,
+            note: input.note?.trim() || session.note,
+            closedAt: nowIso(),
+          }
+          await raw.cashSessions.put(closed)
+          return closed
+          },
+        )
+      },
     },
 
     approvals: {

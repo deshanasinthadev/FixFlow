@@ -7,6 +7,7 @@ import { computeDocument } from "./domain/calculations";
 import { formatLKR } from "./lib/format";
 import { nextRepairStatuses, mayPerformRepairTransition } from "./domain/workflows";
 import { computeDashboardFigures, type DashboardFigures } from "./modules/dashboard/figures";
+import { inspectionPlan, suggestDiagnosis, type DiagnosisResult } from "./modules/diagnosis/engine";
 import type { RepairJob, RepairStatus, Sale } from "./domain/types";
 import type { Product } from "./db/schema";
 import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole, boardColumns, customerProgress } from "./modules/repairs/repairView";
@@ -76,8 +77,8 @@ const products = [
   { name: "Premium Thermal Paste", sku: "SRV-THM-005", price: 2200, stock: 24, icon: "tool" as IconName, cat: "Services" },
 ];
 
-function Button({ children, kind = "primary", icon, onClick }: { children: React.ReactNode; kind?: "primary" | "secondary" | "ghost"; icon?: IconName; onClick?: () => void }) {
-  return <button className={`btn ${kind}`} onClick={onClick}>{icon && <Icon name={icon} size={16} />}<span>{children}</span></button>;
+function Button({ children, kind = "primary", icon, onClick, disabled }: { children: React.ReactNode; kind?: "primary" | "secondary" | "ghost"; icon?: IconName; onClick?: () => void; disabled?: boolean }) {
+  return <button className={`btn ${kind}`} onClick={onClick} disabled={disabled} aria-disabled={disabled || undefined}>{icon && <Icon name={icon} size={16} />}<span>{children}</span></button>;
 }
 
 function Badge({ children, tone }: { children: React.ReactNode; tone?: string }) {
@@ -286,7 +287,7 @@ function App() {
           {page === "My Repair Details" && <CustomerRepairDetails jobNumber={param} jobs={scopedJobs}/>}
           {page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
           {(page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
-          {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis analyzed={analyzed} setAnalyzed={setAnalyzed}/>}
+          {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis/>}
           {!["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis"].includes(page) && <ModulePreview page={page} user={user}/>}
         </main>
       </div>
@@ -871,13 +872,33 @@ function POS({ cart, setCart, actor }: {
     </Card></div>;
 }
 
-function AIDiagnosis({ analyzed, setAnalyzed }: { analyzed: boolean; setAnalyzed: (v:boolean)=>void }) {
-  return <div className="ai-page"><div className="ai-banner"><div className="ai-orb"><Icon name="brain" size={30}/></div><div><span>FIXFLOW INTELLIGENCE</span><h2>AI Diagnosis Assistant</h2><p>Turn repair symptoms into a structured inspection plan in seconds.</p></div></div>
-    <div className="ai-grid"><Card className="ai-form"><div className="card-head"><div><h2>Device information</h2><p>Provide accurate details for a stronger analysis.</p></div><Badge tone="ai">Advisory AI</Badge></div><div className="form-grid"><label>Device type<select><option>Laptop</option></select></label><label>Brand & model<input defaultValue="Dell Latitude 5420"/></label></div><label>Customer complaint<textarea defaultValue="Laptop gets very hot and powers off after 20–30 minutes. Fan is noticeably loud."/></label><label>Technician observations<textarea placeholder="Add initial observations, error codes or tests performed..."/></label><div className="advisory"><Icon name="alert"/><span>AI suggestions are advisory only. Review before applying to the repair record.</span></div><Button icon="spark" onClick={()=>setAnalyzed(true)}>{analyzed?"Run analysis again":"Analyze with AI"}</Button></Card>
-      <Card className={`ai-results ${analyzed?"visible":""}`}>{!analyzed?<div className="empty-ai"><div className="ai-orb subtle"><Icon name="spark"/></div><h3>Ready to analyze</h3><p>Complete the device details to generate possible causes, inspection points and troubleshooting steps.</p></div>:<><div className="card-head"><div><span className="ai-label"><Icon name="spark" size={14}/> Analysis complete</span><h2>Diagnostic insight</h2></div><span className="confidence">86% confidence</span></div><div className="cause"><div><strong>1</strong></div><div><h3>Thermal system degradation</h3><p>Dust obstruction or degraded thermal compound is restricting heat transfer.</p><span>High likelihood · Inspect first</span></div></div><div className="cause"><div><strong>2</strong></div><div><h3>Cooling fan bearing failure</h3><p>Excessive fan noise indicates reduced fan efficiency under load.</p><span>Medium likelihood</span></div></div><div className="inspection"><h3>Recommended inspection</h3>{["Run CPU thermal stress test and monitor peak temperature","Inspect heatsink fins for dust obstruction","Check fan RPM and bearing noise","Inspect and replace thermal compound"].map((x,i)=><div key={x}><span>{i+1}</span>{x}</div>)}</div><Button kind="secondary">Add to technician notes</Button></>}</Card>
+function AIDiagnosis() {
+  const [device, setDevice] = useState("laptop");
+  const [brand, setBrand] = useState("");
+  const [complaint, setComplaint] = useState("");
+  const [observations, setObservations] = useState("");
+  const [result, setResult] = useState<DiagnosisResult | null>(null);
+
+  const run = () => setResult(suggestDiagnosis({
+    complaint: `${complaint} ${brand}`.trim(),
+    observations,
+    deviceCategory: device,
+  }));
+  const plan = result ? inspectionPlan(result) : [];
+
+  return <div className="ai-page"><div className="ai-banner"><div className="ai-orb"><Icon name="brain" size={30}/></div><div><span>RULE-BASED ASSISTANT</span><h2>Diagnosis Assistant</h2><p>Matches reported symptoms against the built-in fault rule base. No external AI service is connected.</p></div></div>
+    <div className="ai-grid"><Card className="ai-form"><div className="card-head"><div><h2>Device information</h2><p>Provide accurate details for a stronger analysis.</p></div><Badge tone="ai">Rule base</Badge></div><div className="form-grid"><label>Device type<select value={device} onChange={(e) => setDevice(e.target.value)}>{["laptop","desktop","mobile","tablet","other"].map((c) => <option key={c} value={c}>{c[0].toUpperCase() + c.slice(1)}</option>)}</select></label><label>Brand & model<input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="Dell Latitude 5420"/></label></div><label>Customer complaint<textarea value={complaint} onChange={(e) => setComplaint(e.target.value)} placeholder="Describe what the customer reported."/></label><label>Technician observations<textarea value={observations} onChange={(e) => setObservations(e.target.value)} placeholder="Add initial observations, error codes or tests performed..."/></label><div className="advisory"><Icon name="alert"/><span>Suggestions come from a local rule base and are advisory only. Review before applying to the repair record.</span></div><Button icon="spark" onClick={run} disabled={!complaint.trim()}>Analyze symptoms</Button></Card>
+      <Card className={`ai-results ${result ? "visible" : ""}`}>{!result?<div className="empty-ai"><div className="ai-orb subtle"><Icon name="spark"/></div><h3>Ready to analyze</h3><p>Describe the fault and run the analysis to get likely causes and an inspection order.</p></div>:<>
+        <div className="card-head"><div><span className="ai-label"><Icon name="spark" size={14}/> Analysis complete</span><h2>Diagnostic insight</h2></div><span className="confidence">{result.matches.length} match{result.matches.length === 1 ? "" : "es"}</span></div>
+        {result.noMatch
+          ? <div className="empty-ai"><div className="ai-orb subtle"><Icon name="alert"/></div><h3>No rule matched</h3><p>Nothing in the rule base fits those symptoms. {result.unmatchedTerms.length ? `Unrecognised terms: ${result.unmatchedTerms.join(", ")}.` : ""} Inspect manually, or add a rule for this fault.</p></div>
+          : <>
+            {result.matches.slice(0, 4).map((match, index) => <div className="cause" key={match.ruleId}><div><strong>{index + 1}</strong></div><div><h3>{match.title}</h3><p>{match.explanation}</p><span>Matched on: {match.matchedKeywords.join(", ")} · score {Math.round(match.score * 100)}%</span></div></div>)}
+            <div className="inspection"><h3>Recommended inspection</h3>{plan.map((step, i) => <div key={step}><span>{i + 1}</span>{step}</div>)}</div>
+          </>}
+      </>}</Card>
     </div></div>;
 }
-
 function ModulePreview({ page, user }: { page: string; user: User }) {
   const isAI = page === "AI Assistant";
   const isLimited = user.role === "Technician" || user.role === "Customer";
