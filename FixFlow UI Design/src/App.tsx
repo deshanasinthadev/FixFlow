@@ -3,6 +3,7 @@ import { Icon, type IconName } from "./components/Icon";
 import { ProductsPage } from "./modules/products/ProductsPage";
 import { CashRegisterPage } from "./modules/pos/CashRegisterPage";
 import { SalesPage } from "./modules/pos/SalesPage";
+import { deriveNotifications } from "./modules/notifications/derive";
 import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
 import { useDb, useQuery } from "./db/store";
 import { computeDocument } from "./domain/calculations";
@@ -292,7 +293,7 @@ function App() {
           {page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
           {(page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
           {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis/>}
-          {!["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds"].includes(page) && <ModulePreview page={page} user={user}/>}
+          {!["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds"].includes(page) && <ModulePreview page={page} user={user} source={{ repairs: scopedJobs, products: scopedProducts }}/>}
         </main>
       </div>
 
@@ -903,18 +904,31 @@ function AIDiagnosis() {
       </>}</Card>
     </div></div>;
 }
-function ModulePreview({ page, user }: { page: string; user: User }) {
+const NOTIFICATION_ICON: Record<string, IconName> = {
+  low_stock: "alert",
+  estimate_approval_request: "file",
+  new_repair: "tool",
+  parts_available: "package",
+  repair_status: "check",
+  payment_receipt: "cash",
+};
+
+function ModulePreview({ page, user, source }: { page: string; user: User; source: { repairs: RepairJob[]; products: Product[] } }) {
   const isAI = page === "AI Assistant";
   const isLimited = user.role === "Technician" || user.role === "Customer";
   if (page === "Notifications") {
-    const messages: Record<Role, Array<[string,string,IconName]>> = {
-      Admin: [["Security alert","A manager account signed in from a new device.","shield"],["Branch performance","Colombo 03 exceeded its weekly repair target.","branch"],["Payment summary","Daily collection summary is ready.","cash"]],
-      Manager: [["Inventory alert","Six branch items are below minimum stock.","alert"],["Repair queue","Three repairs require branch approval.","tool"],["Branch collection","Today's payment summary is ready.","cash"]],
-      Technician: [["New repair assigned","FX-2026-004819 has been assigned to you.","tool"],["Parts available","Requested cooling fan is ready for collection.","package"],["Estimate approved","You can begin work on FX-2026-004821.","check"]],
-      Cashier: [["Pickup ready","One paid repair is ready for customer delivery.","check"],["Payment received","Bank transfer confirmed for INV-2026-1024.","card"],["Register reminder","Your register closes at 6:00 PM.","cash"]],
-      Customer: [["Repair update","Your Dell Latitude 5420 is now in progress.","tool"],["Estimate approved","Your approval was recorded successfully.","file"],["Warranty reminder","Your repair includes a 90-day service warranty.","shield"]],
-    };
-    return <Card className="notification-center"><div className="card-head table-title"><div><h2>Your notifications</h2><p>Private updates for {user.name}</p></div><Button kind="secondary">Mark all read</Button></div>{messages[user.role].map(([title, body, icon], index) => <div className="notification-row" key={title}><div className={`kpi-icon ${index === 0 ? "purple" : "blue"}`}><Icon name={icon}/></div><div><strong>{title}</strong><p>{body}</p><span>{index + 1} hour{index ? "s" : ""} ago</span></div>{index === 0 && <i/>}</div>)}</Card>;
+    // §21 — derived from live records. A notification that cannot be traced to
+    // a record trains people to ignore the panel.
+    const notes = deriveNotifications({
+      role: user.role,
+      technicianId: user.technicianId,
+      repairs: source.repairs,
+      products: source.products,
+    });
+    return <Card className="notification-center"><div className="card-head table-title"><div><h2>Your notifications</h2><p>Derived from live records for {user.name}</p></div></div>
+      {notes.length === 0 && <p className="muted">Nothing needs your attention right now.</p>}
+      {notes.map((note, index) => <div className="notification-row" key={note.id}><div className={`kpi-icon ${note.severity === "warning" ? "amber" : note.severity === "success" ? "cyan" : index === 0 ? "purple" : "blue"}`}><Icon name={NOTIFICATION_ICON[note.kind] ?? "bell"}/></div><div><strong>{note.title}</strong><p>{note.body}</p><span>{note.link}</span></div>{index === 0 && <i/>}</div>)}
+    </Card>;
   }
   const insights = isAI
     ? [["Low stock alert","Five laptop chargers have reached the minimum stock level.","package"],["Repair workload","Technician workload is 18% higher than last week.","tool"],["Sales insight","Mobile accessories generated the highest sales this week.","chart"]]
