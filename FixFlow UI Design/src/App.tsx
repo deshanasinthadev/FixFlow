@@ -4,6 +4,8 @@ import { ProductsPage } from "./modules/products/ProductsPage";
 import { CashRegisterPage } from "./modules/pos/CashRegisterPage";
 import { SalesPage } from "./modules/pos/SalesPage";
 import { deriveNotifications } from "./modules/notifications/derive";
+import { toCsv } from "./csv/pipeline";
+import { downloadText, stamp } from "./lib/download";
 import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
 import { useDb, useQuery } from "./db/store";
 import { computeDocument } from "./domain/calculations";
@@ -141,6 +143,23 @@ function App() {
     () => toRepairRows(scopedJobs, { technicians: technicianNames(repairData?.users ?? []) }),
     [scopedJobs, repairData],
   );
+  // Both labels come from the clock. The hardcoded "Monday, March 18" was also
+  // simply wrong — 18 March 2026 is a Wednesday.
+  const now = new Date()
+  const todayLabel = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })
+  const shortDateLabel = now.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+
+  /** §24 — the repairs list as CSV, from the rows actually on screen. */
+  const exportRepairs = () => {
+    if (!scopedRepairs.length) return
+    const headers = ["Repair ID", "Customer", "Device", "Technician", "Status", "Priority", "Amount", "ETA"]
+    const rows = scopedRepairs.map((r) => ({
+      "Repair ID": r.id, Customer: r.customer, Device: r.device, Technician: r.tech,
+      Status: r.status, Priority: r.priority, Amount: r.amount, ETA: r.eta,
+    }))
+    downloadText(stamp("fixflow-repairs", "csv"), toCsv(headers, rows))
+  }
+
   /** §6 — every dashboard figure derives from saved records. */
   const scopedSales = useMemo<Sale[]>(() => {
     const all = repairData?.sales ?? [];
@@ -275,10 +294,10 @@ function App() {
 
         <main>
           <div className="page-head">
-            <div><div className="eyebrow">{page === "Dashboard" ? `${user.role} workspace · Monday, March 18` : `Home  /  ${page}`}</div><h1>{title}</h1>{page === "Dashboard" && <p>{isCustomer ? "Track your repairs, approvals, payments and warranty in one place." : `Here's what's happening in your ${user.role === "Admin" ? "repair business" : "workspace"} today.`}</p>}</div>
+            <div><div className="eyebrow">{page === "Dashboard" ? `${user.role} workspace · ${todayLabel}` : `Home  /  ${page}`}</div><h1>{title}</h1>{page === "Dashboard" && <p>{isCustomer ? "Track your repairs, approvals, payments and warranty in one place." : `Here's what's happening in your ${user.role === "Admin" ? "repair business" : "workspace"} today.`}</p>}</div>
             <div className="head-actions">
-              {page === "Dashboard" && !isCustomer && <button className="date-filter"><Icon name="clock"/><span>Mar 18, 2026</span><Icon name="chevron" size={13}/></button>}
-              {page === "Repairs" && canCreateRepair && <><Button kind="secondary" icon="download">Export</Button><Button icon="plus" onClick={() => navigate("New Repair")}>New Repair</Button></>}
+              {page === "Dashboard" && !isCustomer && <span className="date-filter" aria-label="Today"><Icon name="clock"/><span>{shortDateLabel}</span></span>}
+              {page === "Repairs" && canCreateRepair && <><Button kind="secondary" icon="download" onClick={exportRepairs}>Export</Button><Button icon="plus" onClick={() => navigate("New Repair")}>New Repair</Button></>}
             </div>
           </div>
 
@@ -408,7 +427,7 @@ function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void;
     </div>
     <div className="dashboard-grid">
       <Card className="sales-chart">
-        <div className="card-head"><div><h2>Sales overview</h2><p>Illustrative curve &mdash; the figures beside it are real; a reporting module will replace the chart</p></div><div className="segments"><button>7D</button><button className="active">30D</button><button>12M</button></div></div>
+        <div className="card-head"><div><h2>Sales overview</h2><p>Illustrative curve &mdash; the figures beside it are real; a reporting module will replace the chart</p></div></div>
         <div className="chart-meta"><div><span className="legend purple"/><small>Sales today</small><strong>{formatLKR(figures.todaySales)}</strong></div><div><span className="legend blue"/><small>Active repairs</small><strong>{figures.activeRepairs}</strong></div></div>
         <div className="line-chart">
           <div className="y-labels"><span>200K</span><span>150K</span><span>100K</span><span>50K</span><span>0</span></div>
