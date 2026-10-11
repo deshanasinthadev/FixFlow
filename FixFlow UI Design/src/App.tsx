@@ -3,6 +3,9 @@ import { Icon, type IconName } from "./components/Icon";
 import { ProductsPage } from "./modules/products/ProductsPage";
 import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
 import { useDb, useQuery } from "./db/store";
+import { computeDocument } from "./domain/calculations";
+import { formatLKR } from "./lib/format";
+import type { Product } from "./db/schema";
 import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow } from "./modules/repairs/repairView";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
@@ -98,7 +101,7 @@ function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [cart, setCart] = useState<Record<string, number>>({ "USB-C Fast Cable": 2 });
+  const [cart, setCart] = useState<Record<string, number>>({});
   const [analyzed, setAnalyzed] = useState(false);
 
   const currentNav = user ? roleNav[user.role] : [];
@@ -249,7 +252,7 @@ function App() {
           {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
           {page === "Repair Details" && <RepairDetails technician={user.role === "Technician"}/>}
           {page === "My Repair Details" && <CustomerRepairDetails data={scopedRepairs}/>}
-          {page === "POS" && <POS cart={cart} setCart={setCart}/>}
+          {page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
           {(page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
           {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis analyzed={analyzed} setAnalyzed={setAnalyzed}/>}
           {!["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis"].includes(page) && <ModulePreview page={page} user={user}/>}
@@ -649,15 +652,117 @@ function RepairDetails({ technician = false }: { technician?: boolean }) {
   </>;
 }
 
-function POS({ cart, setCart }: { cart: Record<string, number>; setCart: React.Dispatch<React.SetStateAction<Record<string, number>>> }) {
-  const add = (name: string) => setCart(c=>({...c,[name]:(c[name]||0)+1}));
-  const change = (name:string,n:number) => setCart(c=>{const next={...c}; if(n<=0) delete next[name]; else next[name]=n; return next});
-  const total = useMemo(()=>Object.entries(cart).reduce((s,[name,q])=>s+(products.find(p=>p.name===name)?.price||0)*q,0),[cart]);
-  return <div className="pos-layout"><div className="pos-products"><div className="pos-search"><Icon name="search"/><input placeholder="Search products, SKU or scan barcode..."/><kbd>F2</kbd></div><div className="category-row">{["All products","Accessories","Chargers","Cables","Spare Parts","Services"].map((x,i)=><button className={i===0?"active":""} key={x}>{x}</button>)}</div><div className="product-grid">{products.map(p=><Card className="product-card" key={p.name}><div className="product-icon"><Icon name={p.icon} size={28}/></div><div className="stock-pill">{p.stock} in stock</div><h3>{p.name}</h3><p>{p.sku}</p><div><strong>Rs. {p.price.toLocaleString()}</strong><button onClick={()=>add(p.name)}><Icon name="plus" size={17}/></button></div></Card>)}</div></div>
-    <Card className="cart-panel"><div className="cart-head"><div><h2>Current sale</h2><p>{Object.values(cart).reduce((a,b)=>a+b,0)} items</p></div><button className="more-btn"><Icon name="more"/></button></div><button className="customer-add"><Icon name="users"/><span><strong>Add customer</strong><small>Optional for walk-in sales</small></span><Icon name="chevron"/></button>
-      <div className="cart-items">{Object.entries(cart).map(([name,q])=>{const p=products.find(x=>x.name===name)!;return <div className="cart-item" key={name}><div className="product-mini"><Icon name={p.icon}/></div><div><strong>{name}</strong><span>Rs. {p.price.toLocaleString()}</span><div className="qty"><button onClick={()=>change(name,q-1)}><Icon name="minus" size={13}/></button><span>{q}</span><button onClick={()=>change(name,q+1)}><Icon name="plus" size={13}/></button></div></div><strong>Rs. {(p.price*q).toLocaleString()}</strong></div>})}</div>
-      <div className="cart-summary"><div><span>Subtotal</span><strong>Rs. {total.toLocaleString()}</strong></div><div><span>Discount</span><button>Add discount</button></div><div><span>Tax</span><strong>Rs. 0</strong></div><div className="total"><span>Total</span><strong>Rs. {total.toLocaleString()}</strong></div></div>
-      <div className="payment-methods">{["cash","card","transfer"].map((x,i)=><button className={i===0?"active":""} key={x}><Icon name={x as IconName}/>{x==="transfer"?"Bank":x[0].toUpperCase()+x.slice(1)}</button>)}</div><Button>Complete sale · Rs. {total.toLocaleString()}</Button><Button kind="secondary">Hold sale</Button>
+const CATEGORY_ICON: Record<string, IconName> = {
+  Accessories: "tool", Chargers: "tool", Cables: "tool", "Spare Parts": "tool", Services: "tool",
+};
+
+function POS({ cart, setCart, actor }: {
+  cart: Record<string, number>;
+  setCart: React.Dispatch<React.SetStateAction<Record<string, number>>>;
+  actor: User;
+}) {
+  const { db, bump } = useDb();
+  const { data: inventory, loading } = useQuery((d) => d.products.list(), []);
+  const all = inventory ?? [];
+
+  const [term, setTerm] = useState("");
+  const [category, setCategory] = useState("All products");
+  const [method, setMethod] = useState<"cash" | "card" | "bank_transfer">("cash");
+  const [discount, setDiscount] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [receipt, setReceipt] = useState<{ number: string; total: number; method: string } | null>(null);
+
+  const categories = useMemo(
+    () => ["All products", ...Array.from(new Set(all.map((p) => p.category)))],
+    [all],
+  );
+
+  const visible = useMemo(() => {
+    const needle = term.trim().toLowerCase();
+    return all.filter((p) => {
+      if (category !== "All products" && p.category !== category) return false;
+      if (!needle) return true;
+      return `${p.name} ${p.sku} ${p.barcode}`.toLowerCase().includes(needle);
+    });
+  }, [all, term, category]);
+
+  const byId = useMemo(() => new Map(all.map((p) => [p.id, p])), [all]);
+  const lines = useMemo(
+    () => Object.entries(cart).map(([id, quantity]) => ({ product: byId.get(id), quantity })).filter((l): l is { product: Product; quantity: number } => Boolean(l.product)),
+    [cart, byId],
+  );
+
+  // One money rule for the whole app: the same domain function the repository
+  // uses at checkout, so the cart and the saved sale can never disagree.
+  const totals = useMemo(
+    () => computeDocument(
+      {
+        labourCost: 0,
+        partsCost: lines.reduce((s, l) => s + l.product.priceCents * l.quantity, 0),
+        discount,
+        taxRate: 0,
+      },
+      false,
+    ),
+    [lines, discount],
+  );
+
+  const itemCount = lines.reduce((s, l) => s + l.quantity, 0);
+
+  const change = (id: string, next: number) => setCart((c) => {
+    const copy = { ...c };
+    if (next <= 0) delete copy[id];
+    else copy[id] = next;
+    return copy;
+  });
+
+  /** A line can never exceed what is actually available to sell. */
+  const availableFor = (product: Product) =>
+    product.stockOnHand - product.reserved - (cart[product.id] ?? 0) + (cart[product.id] ?? 0);
+
+  const complete = async () => {
+    if (!lines.length) { setError("Add at least one product to the cart."); return; }
+    setBusy(true);
+    setError("");
+    try {
+      const sale = await db.sales.checkout({
+        branchId: actor.branchId === "all" ? "br_colombo" : actor.branchId,
+        lines: lines.map((l) => ({ productId: l.product.id, quantity: l.quantity })),
+        discount,
+        taxEnabled: false,
+        paymentMethod: method,
+        cashierId: actor.id,
+        idempotencyKey: `pos-${Date.now()}-${itemCount}`,
+      });
+      setCart({});
+      setDiscount(0);
+      bump();
+      setReceipt({ number: sale.receiptNumber, total: sale.total, method });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not complete the sale.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="pos-layout"><div className="pos-products"><div className="pos-search"><Icon name="search"/><input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Search products, SKU or scan barcode..."/><kbd>F2</kbd></div><div className="category-row">{categories.map((x) => <button className={category === x ? "active" : ""} key={x} onClick={() => setCategory(x)}>{x}</button>)}</div><div className="product-grid">{loading && <p className="muted">Loading products…</p>}
+      {!loading && visible.length === 0 && <p className="muted">No products match that search.</p>}
+      {visible.map((p) => <Card className="product-card" key={p.id}><div className="product-icon"><Icon name={CATEGORY_ICON[p.category] ?? "tool"} size={28}/></div><div className="stock-pill">{p.stockOnHand - p.reserved} available</div><h3>{p.name}</h3><p>{p.sku}</p><div><strong>{formatLKR(p.priceCents)}</strong><button onClick={() => change(p.id, (cart[p.id] ?? 0) + 1)}><Icon name="plus" size={17}/></button></div></Card>)}</div></div>
+    <Card className="cart-panel"><div className="cart-head"><div><h2>Current sale</h2><p>{itemCount} item{itemCount === 1 ? "" : "s"}</p></div><button className="more-btn" onClick={() => setCart({})} title="Clear the cart"><Icon name="more"/></button></div><button className="customer-add"><Icon name="users"/><span><strong>Add customer</strong><small>Optional for walk-in sales</small></span><Icon name="chevron"/></button>
+      <div className="cart-items">{lines.length === 0 && <p className="muted">The cart is empty.</p>}
+        {lines.map(({ product: p, quantity: q }) => {
+          const max = p.stockOnHand - p.reserved;
+          return <div className="cart-item" key={p.id}><div className="product-mini"><Icon name={CATEGORY_ICON[p.category] ?? "tool"}/></div><div><strong>{p.name}</strong><span>{formatLKR(p.priceCents)} · {max} available</span><div className="qty"><button onClick={() => change(p.id, q - 1)}><Icon name="minus" size={13}/></button><span>{q}</span><button onClick={() => q < max ? change(p.id, q + 1) : setError(`Only ${max} of "${p.name}" available.`)}><Icon name="plus" size={13}/></button></div></div><strong>{formatLKR(p.priceCents * q)}</strong></div>;
+        })}</div>
+      <div className="cart-summary"><div><span>Subtotal</span><strong>{formatLKR(totals.gross)}</strong></div>
+        <div><span>Discount</span><input className="input" type="number" min={0} value={discount / 100} onChange={(e) => setDiscount(Math.max(0, Math.round((Number(e.target.value) || 0) * 100)))} style={{ width: 90 }} placeholder="0"/></div>
+        <div><span>Tax</span><strong>{formatLKR(totals.taxAmount)}</strong></div>
+        <div className="total"><span>Total</span><strong>{formatLKR(totals.total)}</strong></div></div>
+      {receipt && <p className="success-text" role="status">Sale {receipt.number} completed · {formatLKR(receipt.total)} · {receipt.method}</p>}
+      {error && <p className="danger-text" role="alert">{error}</p>}
+      <div className="payment-methods">{(["cash", "card", "bank_transfer"] as const).map((x) => <button className={method === x ? "active" : ""} key={x} onClick={() => setMethod(x)}><Icon name={x === "bank_transfer" ? "transfer" : x}/>{x === "bank_transfer" ? "Bank" : x[0].toUpperCase() + x.slice(1)}</button>)}</div>
+      <Button onClick={complete}>{busy ? "Completing…" : `Complete sale · ${formatLKR(totals.total)}`}</Button><Button kind="secondary">Hold sale</Button>
     </Card></div>;
 }
 
