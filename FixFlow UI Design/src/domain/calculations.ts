@@ -268,3 +268,48 @@ export const saleToInvoiceAmounts = (s: Pick<Sale, 'discount' | 'taxRate'> & { i
 })
 
 export type { Invoice }
+
+// ---------------------------------------------------------------------------
+// Warranty (§17)
+// ---------------------------------------------------------------------------
+
+/**
+ * §17 — whether a warranty is live.
+ *
+ * Derived from the dates stored on the warranty, never recomputed from the
+ * product's current policy. Editing a product's warranty period after the fact
+ * must not silently extend or shorten cover somebody already has; the row is
+ * the contract, and the policy is only what new cover is sold under.
+ */
+export const isWarrantyActive = (
+  warranty: { startsAt: string; expiresAt: string },
+  now: Date = new Date(),
+): boolean => {
+  const start = new Date(warranty.startsAt).getTime()
+  const end = new Date(warranty.expiresAt).getTime()
+  if (Number.isNaN(start) || Number.isNaN(end)) return false
+  const at = now.getTime()
+  return at >= start && at <= end
+}
+
+/**
+ * §17 — cover ending soon, so it can be surfaced before the customer finds out
+ * by being refused a claim. The default window is 30 days.
+ */
+export const isWarrantyExpiringSoon = (
+  warranty: { expiresAt: string },
+  now: Date = new Date(),
+  withinDays = 30,
+): boolean => {
+  const days = daysUntil(warranty.expiresAt, now)
+  return days >= 0 && days <= withinDays
+}
+
+/**
+ * §17 — the expiry date for a policy, given when cover starts.
+ *
+ * A zero-month policy has no cover, and the caller should not create a warranty
+ * at all rather than one that expires the moment it starts.
+ */
+export const warrantyExpiry = (startsAt: string, durationMonths: number): string =>
+  addMonths(startsAt, int(durationMonths))

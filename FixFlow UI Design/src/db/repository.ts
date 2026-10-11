@@ -16,6 +16,10 @@ import type {
   PaymentMethodId,
   RepairJob,
   RepairPartUsage,
+  Warranty,
+  WarrantyClaim,
+  WarrantyClaimStatus,
+  WarrantyPolicy,
   RepairStatus,
   RepairStatusHistoryEntry,
   Refund,
@@ -275,6 +279,68 @@ export interface Db {
     /** True when the repair has an approval that has not been rejected. */
     hasApprovalFor(repairId: string): Promise<boolean>
   }
+
+  /**
+   * Warranty (§17).
+   *
+   * Product cover and repair-service cover are separate promises — one covers
+   * goods sold, the other work performed — so a claim against one is not a
+   * claim against the other. Both are stored the same way.
+   */
+  warranty: {
+    /** The cover terms on offer. */
+    policies(): Promise<WarrantyPolicy[]>
+    /**
+     * Add cover terms.
+     *
+     * §17 — product and repair-service cover are separate policies, because
+     * they are different promises with different durations.
+     */
+    addPolicy(input: WarrantyPolicyInput): Promise<WarrantyPolicy>
+    /**
+     * Change cover terms for future issues only.
+     *
+     * §17 — warranties already issued keep the dates stored on their own rows.
+     * A product's policy changing from 12 months to 6 must not silently halve
+     * cover somebody has already paid for.
+     */
+    updatePolicy(id: string, input: WarrantyPolicyInput): Promise<WarrantyPolicy>
+
+    /** Issue cover, computing and storing its expiry at the moment of issue. */
+    issue(input: WarrantyInput): Promise<Warranty>
+
+    list(): Promise<Warranty[]>
+    get(id: string): Promise<Warranty | undefined>
+
+    /**
+     * §17 — find cover by any reference a customer can quote: invoice number,
+     * repair job number, phone or device serial.
+     */
+    search(term: string): Promise<Warranty[]>
+
+    /** Cover ending within the given number of days, still live. */
+    expiringSoon(withinDays?: number): Promise<Warranty[]>
+
+    /** Withdraw cover. Requires a reason; never a silent delete. */
+    void(warrantyId: string, reason: string): Promise<void>
+
+    claims(): Promise<WarrantyClaim[]>
+    claim(id: string): Promise<WarrantyClaim | undefined>
+    claimsFor(warrantyId: string): Promise<WarrantyClaim[]>
+    /** Raise a claim. Refuses cover that has already expired. */
+    submitClaim(input: WarrantyClaimInput): Promise<WarrantyClaim>
+    /** Record what inspection found, moving the claim to `under_inspection`. */
+    inspect(claimId: string, findings: string): Promise<WarrantyClaim>
+    /** Approve or reject. Findings must already be recorded, per §17. */
+    decideClaim(claimId: string, outcome: 'approved' | 'rejected', input: WarrantyClaimDecisionInput, actorId: string): Promise<WarrantyClaim>
+    /** Move an approved claim on to `in_progress`. */
+    startClaimWork(claimId: string): Promise<WarrantyClaim>
+    /** Record how the claim was put right. */
+    resolveClaim(claimId: string, resolution: string): Promise<WarrantyClaim>
+    /** Close it out. */
+    closeClaim(claimId: string): Promise<WarrantyClaim>
+    nextWarrantyNumber(prefix: string): Promise<string>
+  }
 }
 
 /**
@@ -298,6 +364,42 @@ export interface EstimateInput {
   notes?: string
   expiresAt?: string
   actorId: string
+}
+
+/** §17 — the cover terms new warranties are sold under. */
+export interface WarrantyPolicyInput {
+  name: string
+  durationMonths: number
+  terms: string
+  exclusions: string
+  appliesTo: 'product' | 'repair_service' | 'component'
+}
+
+/**
+ * §17 — cover to issue.
+ *
+ * The expiry is computed from the policy at the moment of issue and stored on
+ * the row. Later edits to the policy must not reach back and change cover
+ * somebody already has: the row is the contract.
+ */
+export interface WarrantyInput {
+  policyId: string
+  customerId: string
+  productId?: string
+  repairId?: string
+  startsAt?: string
+}
+
+export interface WarrantyClaimInput {
+  warrantyId: string
+  reportedIssue: string
+  repairId?: string
+}
+
+export interface WarrantyClaimDecisionInput {
+  /** What inspection found. Required before a decision, per §17. */
+  findings: string
+  resolution?: string
 }
 
 export interface RepairPartInput {

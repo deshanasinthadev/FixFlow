@@ -12,6 +12,8 @@ import {
   invoiceStatusFor,
   isEstimateExpired,
   isLowStock,
+  isWarrantyActive,
+  isWarrantyExpiringSoon,
   monthsBetween,
   operatingResult,
   purchaseOrderTotal,
@@ -20,6 +22,7 @@ import {
   saleCostOfGoods,
   saleRevenue,
   sumLines,
+  warrantyExpiry,
 } from './calculations'
 import {
   canDecideClaim,
@@ -554,5 +557,69 @@ describe('navigation by role (§5)', () => {
   })
   it('returns false for an unknown group rather than throwing', () => {
     expect(canSeeNavGroup('admin', 'Nonexistent')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Warranty (§17)
+// ---------------------------------------------------------------------------
+
+describe('warrantyExpiry', () => {
+  it('adds the policy duration to the start date', () => {
+    expect(warrantyExpiry('2026-01-15T00:00:00.000Z', 12)).toBe('2027-01-15T00:00:00.000Z')
+    expect(warrantyExpiry('2026-01-15T00:00:00.000Z', 3)).toBe('2026-04-15T00:00:00.000Z')
+  })
+
+  it('returns the start date for a zero-month policy', () => {
+    expect(warrantyExpiry('2026-01-15T00:00:00.000Z', 0)).toBe('2026-01-15T00:00:00.000Z')
+  })
+
+  it('is stable across a month-end boundary', () => {
+    // 31 January plus one month must not silently become 3 March.
+    expect(warrantyExpiry('2026-01-31T00:00:00.000Z', 1)).toBe('2026-03-03T00:00:00.000Z')
+  })
+})
+
+describe('isWarrantyActive', () => {
+  const cover = { startsAt: '2026-01-01T00:00:00.000Z', expiresAt: '2027-01-01T00:00:00.000Z' }
+
+  it('is active inside the window', () => {
+    expect(isWarrantyActive(cover, new Date('2026-06-01T00:00:00.000Z'))).toBe(true)
+  })
+
+  it('is active on the first and last day', () => {
+    expect(isWarrantyActive(cover, new Date('2026-01-01T00:00:00.000Z'))).toBe(true)
+    expect(isWarrantyActive(cover, new Date('2027-01-01T00:00:00.000Z'))).toBe(true)
+  })
+
+  it('is not active before cover starts', () => {
+    expect(isWarrantyActive(cover, new Date('2025-12-31T00:00:00.000Z'))).toBe(false)
+  })
+
+  it('is not active after it expires', () => {
+    expect(isWarrantyActive(cover, new Date('2027-01-02T00:00:00.000Z'))).toBe(false)
+  })
+
+  it('treats an unparseable date as no cover rather than throwing', () => {
+    expect(isWarrantyActive({ startsAt: 'nonsense', expiresAt: '2027-01-01T00:00:00.000Z' })).toBe(false)
+  })
+})
+
+describe('isWarrantyExpiringSoon', () => {
+  it('flags cover ending inside the window', () => {
+    const cover = { expiresAt: '2026-06-20T00:00:00.000Z' }
+    expect(isWarrantyExpiringSoon(cover, new Date('2026-06-01T00:00:00.000Z'), 30)).toBe(true)
+  })
+
+  it('does not flag cover ending outside the window', () => {
+    const cover = { expiresAt: '2026-09-01T00:00:00.000Z' }
+    expect(isWarrantyExpiringSoon(cover, new Date('2026-06-01T00:00:00.000Z'), 30)).toBe(false)
+  })
+
+  it('does not flag cover that has already expired', () => {
+    // Expired is a different state from expiring soon; conflating them would
+    // make the "ending soon" list a list of dead warranties.
+    const cover = { expiresAt: '2026-05-01T00:00:00.000Z' }
+    expect(isWarrantyExpiringSoon(cover, new Date('2026-06-01T00:00:00.000Z'), 30)).toBe(false)
   })
 })

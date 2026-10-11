@@ -25,22 +25,32 @@ import type {
   SaleItem,
   StockReservation,
   User,
+  Warranty,
+  WarrantyClaim,
+  WarrantyClaimStatus,
+  WarrantyPolicy,
 } from '../domain/types'
 import {
   balanceDue,
   checkStockAvailability,
   computeDocument,
   invoiceStatusFor,
+  isWarrantyActive,
+  isWarrantyExpiringSoon,
   sumLines,
+  warrantyExpiry,
 } from '../domain/calculations'
-import { EXPENSE_CATEGORIES } from '../domain/types'
+import { EXPENSE_CATEGORIES, WARRANTY_CLAIM_STATUSES } from '../domain/types'
 import {
   assertEstimateRevision,
+  canDecideClaim,
   canRecordApproval,
   canStartWork,
+  canTransitionClaim,
   canTransitionEstimate,
   ESTIMATE_STATUS_LABEL,
   STATUSES_REQUIRING_APPROVAL,
+  WARRANTY_CLAIM_TRANSITIONS,
 } from '../domain/workflows'
 import type {
   ApprovalInput,
@@ -63,6 +73,10 @@ import type {
   RepairFilter,
   RepairInput,
   RepairPartInput,
+  WarrantyClaimDecisionInput,
+  WarrantyClaimInput,
+  WarrantyInput,
+  WarrantyPolicyInput,
   SaleFilter,
   StockAdjust,
 } from './repository'
@@ -113,6 +127,11 @@ export function createDb(name: string = DB_NAME): Db {
     repairs!: Table<RepairJob, string>
     repairHistory!: Table<RepairStatusHistoryEntry, string>
     repairParts!: Table<RepairPartUsage, string>
+    /** §17 — the cover terms new warranties are sold under */
+    warrantyPolicies!: Table<WarrantyPolicy, string>
+    /** §17 — issued cover; the row is the contract, not the policy */
+    warranties!: Table<Warranty, string>
+    warrantyClaims!: Table<WarrantyClaim, string>
     sales!: Table<Sale, string>
     refunds!: Table<Refund, string>
     reservations!: Table<StockReservation, string>
@@ -169,6 +188,12 @@ export function createDb(name: string = DB_NAME): Db {
       // Version 8 adds parts consumed by a repair (§11, §28.3).
       this.version(8).stores({
         repairParts: 'id, repairId, productId, createdAt',
+      })
+      // §17 — warranty policies, issued cover and claims.
+      this.version(9).stores({
+        warrantyPolicies: 'id, name, appliesTo',
+        warranties: 'id, warrantyNumber, policyId, customerId, productId, repairId, expiresAt, status, createdAt',
+        warrantyClaims: 'id, claimNumber, warrantyId, customerId, repairId, status, createdAt',
       })
     }
   }
@@ -1772,6 +1797,255 @@ export function createDb(name: string = DB_NAME): Db {
       async hasApprovalFor(repairId: string) {
         const rows = await raw.approvals.where('repairId').equals(repairId).toArray()
         return rows.some((a) => a.decision === 'approved')
+      },
+    },
+
+    // §17 — warranty. The dates live on the issued row, never on the policy:
+    // editing a product's cover must not reach back and change what somebody
+    // has already been given.
+    warranty: {
+      policies: () => raw.warrantyPolicies.toArray(),
+
+      async addPolicy(input: WarrantyPolicyInput): Promise<WarrantyPolicy> {
+        if (!Number.isInteger(input.durationMonths) || input.durationMonths < 0) {
+          throw new Error('Cover must be a whole number of months, or zero for none.')
+        }
+        if (!input.name.trim()) throw new Error('Give the cover terms a name.')
+        const policy: WarrantyPolicy = {
+          id: newId('wtp'),
+          name: input.name.trim(),
+          durationMonths: input.durationMonths,
+          terms: input.terms,
+          exclusions: input.exclusions,
+          appliesTo: input.appliesTo,
+        }
+        await raw.warrantyPolicies.add(policy)
+        return policy
+      },
+
+      async updatePolicy(id: string, input: WarrantyPolicyInput): Promise<WarrantyPolicy> {
+        const existing = await raw.warrantyPolicies.get(id)
+        if (!existing) throw new Error(`No cover terms ${id}`)
+        if (!Number.isInteger(input.durationMonths) || input.durationMonths < 0) {
+          throw new Error('Cover must be a whole number of months, or zero for none.')
+        }
+        // Only the policy row changes. Issued warranties are untouched, so cover
+        // already in force keeps the dates it was sold with.
+        const updated: WarrantyPolicy = {
+          ...existing,
+          name: input.name.trim() || existing.name,
+          durationMonths: input.durationMonths,
+          terms: input.terms,
+          exclusions: input.exclusions,
+          appliesTo: input.appliesTo,
+        }
+        await raw.warrantyPolicies.put(updated)
+        return updated
+      },
+
+      async issue(input: WarrantyInput): Promise<Warranty> {
+        const policy = await raw.warrantyPolicies.get(input.policyId)
+        if (!policy) throw new Error(`No cover terms ${input.policyId}`)
+        if (policy.durationMonths === 0) {
+          // Better refused than issued: a warranty that expires the instant it
+          // starts is not cover, and printing one would mislead the customer.
+          throw new Error(`${policy.name} provides no cover, so there is nothing to issue.`)
+        }
+        const customer = await raw.customers.get(input.customerId)
+        if (!customer) throw new Error(`No customer ${input.customerId}`)
+        if (input.productId) {
+          const product = await raw.products.get(input.productId)
+          if (!product) throw new Error(`No product ${input.productId}`)
+        }
+        if (input.repairId) {
+          const repair = await raw.repairs.get(input.repairId)
+          if (!repair) throw new Error(`No repair ${input.repairId}`)
+        }
+
+        const startsAt = input.startsAt ?? nowIso()
+        const warranty: Warranty = {
+          id: newId('wty'),
+          warrantyNumber: await this.nextWarrantyNumber(policy.appliesTo === 'repair_service' ? 'WR' : 'WP'),
+          policyId: policy.id,
+          customerId: input.customerId,
+          productId: input.productId ?? '',
+          repairId: input.repairId ?? '',
+          startsAt,
+          // Stored, not derived at read time. This is what stops a later policy
+          // edit from silently changing cover already in force.
+          expiresAt: warrantyExpiry(startsAt, policy.durationMonths),
+          status: 'active',
+          createdAt: nowIso(),
+        }
+        await raw.warranties.add(warranty)
+        return warranty
+      },
+
+      list: async () => {
+        const rows = await raw.warranties.orderBy('createdAt').reverse().toArray()
+        // Status is refreshed on read rather than trusted from the row: cover
+        // lapses with the passage of time and nothing writes to the database
+        // when that happens.
+        return rows.map((w) => ({
+          ...w,
+          status: w.status === 'void' || w.status === 'claimed'
+            ? w.status
+            : (isWarrantyActive(w) ? 'active' : 'expired'),
+        }))
+      },
+
+      get: (id) => raw.warranties.get(id),
+
+      async search(term: string): Promise<Warranty[]> {
+        const needle = term.trim().toLowerCase()
+        if (!needle) return []
+        const [warranties, customers, repairs, products] = await Promise.all([
+          raw.warranties.toArray(),
+          raw.customers.toArray(),
+          raw.repairs.toArray(),
+          raw.products.toArray(),
+        ])
+        const customerIds = new Set(customers.filter((c) => c.phone.toLowerCase().includes(needle) || c.fullName.toLowerCase().includes(needle)).map((c) => c.id))
+        const repairIds = new Set(repairs.filter((r) => r.jobNumber.toLowerCase().includes(needle) || r.serialNumber.toLowerCase().includes(needle)).map((r) => r.id))
+        const productIds = new Set(products.filter((pr) => pr.sku.toLowerCase().includes(needle) || pr.name.toLowerCase().includes(needle)).map((pr) => pr.id))
+
+        return warranties
+          .filter((w) =>
+            w.warrantyNumber.toLowerCase().includes(needle)
+            || customerIds.has(w.customerId)
+            || (w.repairId !== '' && repairIds.has(w.repairId))
+            || (w.productId !== '' && productIds.has(w.productId)))
+          .map((w) => ({
+            ...w,
+            status: w.status === 'void' || w.status === 'claimed' ? w.status : (isWarrantyActive(w) ? 'active' : 'expired'),
+          }))
+      },
+
+      async expiringSoon(withinDays = 30): Promise<Warranty[]> {
+        const rows = await raw.warranties.toArray()
+        return rows.filter((w) => isWarrantyActive(w) && isWarrantyExpiringSoon(w, new Date(), withinDays))
+      },
+
+      async void(warrantyId: string, reason: string): Promise<void> {
+        if (!reason.trim()) throw new Error('Record why the cover was withdrawn.')
+        const existing = await raw.warranties.get(warrantyId)
+        if (!existing) throw new Error(`No warranty ${warrantyId}`)
+        if (existing.status === 'void') throw new Error('That cover is already withdrawn.')
+        await raw.warranties.update(warrantyId, { status: 'void' })
+      },
+
+      claims: async () => raw.warrantyClaims.orderBy('createdAt').reverse().toArray(),
+      claim: (id) => raw.warrantyClaims.get(id),
+      claimsFor: (warrantyId) => raw.warrantyClaims.where('warrantyId').equals(warrantyId).toArray(),
+
+      async submitClaim(input: WarrantyClaimInput): Promise<WarrantyClaim> {
+        if (!input.reportedIssue.trim()) throw new Error('Describe what has gone wrong.')
+        const warranty = await raw.warranties.get(input.warrantyId)
+        if (!warranty) throw new Error(`No warranty ${input.warrantyId}`)
+        if (warranty.status === 'void') throw new Error('That cover was withdrawn, so it cannot be claimed against.')
+        // §17 — a claim against lapsed cover is refused here rather than left to
+        // be discovered at the counter.
+        if (!isWarrantyActive(warranty)) {
+          throw new Error(`That cover expired on ${warranty.expiresAt.slice(0, 10)}.`)
+        }
+
+        const claim: WarrantyClaim = {
+          id: newId('wcl'),
+          claimNumber: `WCL-${nowIso().slice(0, 4)}-${String(await raw.warrantyClaims.count() + 1).padStart(4, '0')}`,
+          warrantyId: warranty.id,
+          customerId: warranty.customerId,
+          repairId: input.repairId ?? '',
+          reportedIssue: input.reportedIssue.trim(),
+          findings: '',
+          resolution: '',
+          status: 'submitted',
+          decidedBy: '',
+          createdAt: nowIso(),
+          decidedAt: '',
+        }
+        await raw.warrantyClaims.add(claim)
+        return claim
+      },
+
+      async inspect(claimId: string, findings: string): Promise<WarrantyClaim> {
+        if (!findings.trim()) throw new Error('Record what inspection found.')
+        const claim = await raw.warrantyClaims.get(claimId)
+        if (!claim) throw new Error(`No claim ${claimId}`)
+        if (!canTransitionClaim(claim.status, 'under_inspection')) {
+          throw new Error(`A ${claim.status} claim cannot be inspected.`)
+        }
+        const updated = { ...claim, findings: findings.trim(), status: 'under_inspection' as const }
+        await raw.warrantyClaims.put(updated)
+        return updated
+      },
+
+      async decideClaim(claimId: string, outcome: 'approved' | 'rejected', input: WarrantyClaimDecisionInput, actorId: string): Promise<WarrantyClaim> {
+        const claim = await raw.warrantyClaims.get(claimId)
+        if (!claim) throw new Error(`No claim ${claimId}`)
+        // §17 — no decision without findings on file.
+        if (!canDecideClaim(claim.status, input.findings)) {
+          throw new Error('Record what inspection found before deciding.')
+        }
+        if (!canTransitionClaim(claim.status, outcome)) {
+          throw new Error(`That claim cannot be ${outcome} from ${claim.status}.`)
+        }
+        const updated = {
+          ...claim,
+          findings: input.findings.trim(),
+          resolution: input.resolution?.trim() ?? '',
+          status: outcome,
+          // §17 — who decided is part of the record, not decoration.
+          decidedBy: actorId,
+          decidedAt: nowIso(),
+        }
+        await raw.warrantyClaims.put(updated)
+        if (outcome === 'approved') {
+          await raw.warranties.update(claim.warrantyId, { status: 'claimed' })
+        }
+        return updated
+      },
+
+      async startClaimWork(claimId: string): Promise<WarrantyClaim> {
+        const claim = await raw.warrantyClaims.get(claimId)
+        if (!claim) throw new Error(`No claim ${claimId}`)
+        if (!canTransitionClaim(claim.status, 'in_progress')) {
+          throw new Error(`Only an approved claim can start work; this one is ${claim.status}.`)
+        }
+        const updated = { ...claim, status: 'in_progress' as const }
+        await raw.warrantyClaims.put(updated)
+        return updated
+      },
+
+      async resolveClaim(claimId: string, resolution: string): Promise<WarrantyClaim> {
+        if (!resolution.trim()) throw new Error('Record how the claim was put right.')
+        const claim = await raw.warrantyClaims.get(claimId)
+        if (!claim) throw new Error(`No claim ${claimId}`)
+        if (!canTransitionClaim(claim.status, 'resolved')) {
+          throw new Error(`A ${claim.status} claim cannot be resolved yet.`)
+        }
+        const updated = { ...claim, resolution: resolution.trim(), status: 'resolved' as const }
+        await raw.warrantyClaims.put(updated)
+        return updated
+      },
+
+      async closeClaim(claimId: string): Promise<WarrantyClaim> {
+        const claim = await raw.warrantyClaims.get(claimId)
+        if (!claim) throw new Error(`No claim ${claimId}`)
+        if (!canTransitionClaim(claim.status, 'closed')) {
+          throw new Error(`A ${claim.status} claim cannot be closed.`)
+        }
+        const updated = { ...claim, status: 'closed' as const }
+        await raw.warrantyClaims.put(updated)
+        return updated
+      },
+
+      async nextWarrantyNumber(prefix: string): Promise<string> {
+        const year = nowIso().slice(0, 4)
+        const all = await raw.warranties.toArray()
+        const highest = all
+          .filter((w) => w.warrantyNumber.startsWith(`${prefix}-${year}-`))
+          .reduce((max, w) => Math.max(max, Number(w.warrantyNumber.split('-').pop()) || 0), 0)
+        return `${prefix}-${year}-${String(highest + 1).padStart(4, '0')}`
       },
     },
   }
