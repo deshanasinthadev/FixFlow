@@ -2,7 +2,7 @@ import { mayPerformRepairTransition } from '../../domain/workflows'
 import { describe, expect, it } from 'vitest'
 import type { RepairJob, RepairStatus, User } from '../../domain/types'
 import { REPAIR_STATUSES } from '../../domain/types'
-import { PRIORITY_LABEL, STATUS_LABEL, countRepairs, formatEta, scopeRepairsFor, statusBadgeTone, technicianNames, toRepairRow, toRepairRows, toDomainRole } from './repairView'
+import { PRIORITY_LABEL, STATUS_LABEL, countRepairs, formatEta, scopeRepairsFor, statusBadgeTone, technicianNames, toRepairRow, toRepairRows, toDomainRole, boardColumns, type RepairRow } from './repairView'
 
 /**
  * The adapter between persisted RepairJob records and the row shape the
@@ -262,5 +262,80 @@ describe('toDomainRole', () => {
     const role = toDomainRole('Technician')
     expect(mayPerformRepairTransition(role, 'received', 'diagnosing').allowed).toBe(true)
     expect(mayPerformRepairTransition(role, 'testing', 'delivered').allowed).toBe(false)
+  })
+})
+
+/** A minimal row — only `status` matters to the board. */
+const row = (id: string, status: string): RepairRow => ({
+  id, customerId: 'cus_x', technicianId: '', branchId: 'br_colombo',
+  customer: 'Test Customer', device: 'Test Device', tech: 'Unassigned',
+  priority: 'Normal', status, amount: 'Rs. 0', eta: 'Not set',
+})
+
+describe('boardColumns', () => {
+  it('groups rows by their actual status instead of inventing cards', () => {
+    const columns = boardColumns([
+      row('FX-1', 'Received'),
+      row('FX-2', 'Received'),
+      row('FX-3', 'Testing'),
+    ])
+    const received = columns.find((c) => c.label === 'Received')!
+    const testing = columns.find((c) => c.label === 'Testing')!
+    expect(received.rows.map((r) => r.id)).toEqual(['FX-1', 'FX-2'])
+    expect(testing.rows.map((r) => r.id)).toEqual(['FX-3'])
+  })
+
+  it('never renders the same repair in two columns', () => {
+    // Regression: the old board used data[i % data.length] and duplicated rows.
+    const rows = [row('FX-1', 'Received'), row('FX-2', 'Testing')]
+    const rendered = boardColumns(rows).flatMap((c) => c.rows.map((r) => r.id))
+    expect(rendered).toHaveLength(2)
+    expect(new Set(rendered).size).toBe(2)
+  })
+
+  it('renders every repair given to it, so nothing is silently dropped', () => {
+    const rows = [
+      row('FX-1', 'Received'), row('FX-2', 'Awaiting Parts'), row('FX-3', 'Approved'),
+      row('FX-4', 'Completed'), row('FX-5', 'Delivered'), row('FX-6', 'Cancelled'),
+    ]
+    const rendered = boardColumns(rows).flatMap((c) => c.rows.map((r) => r.id))
+    expect(rendered.sort()).toEqual(rows.map((r) => r.id).sort())
+  })
+
+  it('keeps the active workflow in order, even for empty columns', () => {
+    const columns = boardColumns([])
+    const labels = columns.map((c) => c.label)
+    expect(labels.indexOf('Received')).toBeLessThan(labels.indexOf('Diagnosing'))
+    expect(labels.indexOf('Diagnosing')).toBeLessThan(labels.indexOf('Awaiting Approval'))
+    expect(labels.indexOf('Awaiting Approval')).toBeLessThan(labels.indexOf('Testing'))
+    // Empty columns still render, so the board reads as a workflow.
+    expect(columns.every((c) => c.rows.length === 0)).toBe(true)
+  })
+
+  it('orders the whole workflow, received first and the terminal statuses last', () => {
+    const columns = boardColumns([row('FX-9', 'Delivered'), row('FX-1', 'Received')])
+    const labels = columns.map((c) => c.label)
+    expect(labels[0]).toBe('Received')
+    expect(labels.indexOf('Received')).toBeLessThan(labels.indexOf('Testing'))
+    expect(labels.indexOf('Testing')).toBeLessThan(labels.indexOf('Delivered'))
+    expect(labels[labels.length - 1]).toBe('Cancelled')
+  })
+
+  it('heads columns with the same labels toRepairRow puts on rows', () => {
+    // Regression: the domain and view label maps differ on four statuses.
+    // If the board headings used the domain wording, those columns would
+    // never match a row and would render permanently empty.
+    const repairJob = job({ status: 'repairing' })
+    const [rowFromJob] = toRepairRows([repairJob], { technicians: {}, now: new Date('2026-03-18T09:00:00.000Z') })
+    const columns = boardColumns([rowFromJob])
+    const filled = columns.find((c) => c.rows.length === 1)
+    expect(filled).toBeDefined()
+    expect(filled!.label).toBe(rowFromJob.status)
+  })
+
+  it('counts add up to the number of rows', () => {
+    const rows = [row('FX-1', 'Received'), row('FX-2', 'Testing'), row('FX-3', 'Testing')]
+    const total = boardColumns(rows).reduce((sum, c) => sum + c.rows.length, 0)
+    expect(total).toBe(3)
   })
 })

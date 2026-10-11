@@ -8,7 +8,7 @@ import { formatLKR } from "./lib/format";
 import { nextRepairStatuses, mayPerformRepairTransition } from "./domain/workflows";
 import type { RepairStatus } from "./domain/types";
 import type { Product } from "./db/schema";
-import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole } from "./modules/repairs/repairView";
+import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole, boardColumns } from "./modules/repairs/repairView";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
 type User = {
@@ -499,9 +499,10 @@ function RepairTable({ compact = false, navigate, data, showFinancial = true }: 
 }
 
 function RepairBoard({ data }: { data: RepairRow[] }) {
-  const cols = ["Received", "Diagnosing", "Awaiting Approval", "In Progress", "Testing", "Ready for Pickup"];
-  return <div className="kanban">{cols.map((col, i) => <div className="kanban-col" key={col}><div className="kanban-head"><Badge>{col}</Badge><span>{i === 3 ? 4 : i === 5 ? 3 : 2}</span></div>
-    {data.length > 0 && [data[i%data.length], data[(i+2)%data.length]].map((r,j)=><Card className="repair-card" key={r.id+j}><div><strong>{r.id}</strong><span className={`priority ${r.priority.toLowerCase()}`}>{r.priority}</span></div><h3>{r.device}</h3><p>{r.customer}</p><div className="repair-card-foot"><span><Icon name="clock" size={14}/>{r.eta}</span><div className="avatar tiny">{r.tech.split(" ").map(x=>x[0]).join("")}</div></div></Card>)}
+  const columns = boardColumns(data);
+  return <div className="kanban">{columns.map((col) => <div className="kanban-col" key={col.label}><div className="kanban-head"><Badge>{col.label}</Badge><span>{col.rows.length}</span></div>
+    {col.rows.length === 0 && <p className="muted">Nothing here.</p>}
+    {col.rows.map((r) => <Card className="repair-card" key={r.id}><div><strong>{r.id}</strong><span className={`priority ${r.priority.toLowerCase()}`}>{r.priority}</span></div><h3>{r.device}</h3><p>{r.customer}</p><div className="repair-card-foot"><span><Icon name="clock" size={14}/>{r.eta}</span><div className="avatar tiny">{r.tech.split(" ").map(x=>x[0]).join("")}</div></div></Card>)}
   </div>)}</div>;
 }
 

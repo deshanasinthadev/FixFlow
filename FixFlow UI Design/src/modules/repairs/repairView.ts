@@ -1,5 +1,6 @@
 import type { RepairJob, RepairPriority, RepairStatus, User } from '../../domain/types'
 import { formatLKR } from '../../lib/format'
+import { REPAIR_STATUS_LABEL } from '../../domain/workflows'
 
 /**
  * Maps persisted RepairJob records into the exact row shape the existing
@@ -192,3 +193,35 @@ export const countRepairs = (jobs: RepairJob[]): RepairCounts => {
   })
   return counts
 }
+
+/**
+ * Kanban columns, in workflow order, for the rows given.
+ *
+ * Every status actually present in the data gets a column. A status outside
+ * the active workflow — a delivered or cancelled job, say — appears at the end
+ * under its own heading rather than vanishing. The previous board hard-coded
+ * six column names and duplicated rows with `data[i % data.length]`, which both
+ * invented cards and hid five of the eleven statuses.
+ */
+/** Every status in workflow order, `received` first and the terminal ones last. */
+const WORKFLOW_ORDER = Object.keys(REPAIR_STATUS_LABEL) as RepairStatus[]
+
+export const boardColumns = (rows: RepairRow[]): { label: string; rows: RepairRow[] }[] => {
+  // Order comes from the domain, but the heading text must be STATUS_LABEL:
+  // that is the label toRepairRow puts on the row, and the two maps differ
+  // ("Awaiting Approval" vs "Waiting for Approval", "In Progress" vs
+  // "Repairing"). Heading columns with the domain wording would leave four
+  // columns permanently empty.
+  const order = WORKFLOW_ORDER.map((s) => STATUS_LABEL[s])
+  const extra = rows
+    .map((r) => r.status)
+    .filter((label) => !order.includes(label))
+    .filter((label, i, all) => all.indexOf(label) === i)
+  return [...order, ...extra].map((label) => ({
+    label,
+    rows: rows.filter((r) => r.status === label),
+  }))
+}
+
+/** Total cards, so the board can show a count that matches what it renders. */
+export const boardTotal = (rows: RepairRow[]): number => rows.length
