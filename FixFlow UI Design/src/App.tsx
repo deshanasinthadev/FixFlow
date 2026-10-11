@@ -6,7 +6,8 @@ import { useDb, useQuery } from "./db/store";
 import { computeDocument } from "./domain/calculations";
 import { formatLKR } from "./lib/format";
 import { nextRepairStatuses, mayPerformRepairTransition } from "./domain/workflows";
-import type { RepairStatus } from "./domain/types";
+import { computeDashboardFigures, type DashboardFigures } from "./modules/dashboard/figures";
+import type { RepairJob, RepairStatus } from "./domain/types";
 import type { Product } from "./db/schema";
 import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole, boardColumns } from "./modules/repairs/repairView";
 
@@ -114,19 +115,39 @@ function App() {
   const allowedPages = [...navPages, ...extraPages];
   // §6 — every figure on these screens derives from saved records.
   const { data: repairData, loading: repairsLoading, error: repairsError } = useQuery(
-    async (d) => ({ jobs: await d.repairs.list(), users: await d.users.list() }),
+    async (d) => ({
+      jobs: await d.repairs.list(),
+      users: await d.users.list(),
+      sales: await d.sales.list(),
+      products: await d.products.list(),
+    }),
     [],
   );
-  const scopedRepairs = useMemo<RepairRow[]>(() => {
+  /** Scoped to what this role may see, so no figure leaks another branch. */
+  const scopedJobs = useMemo<RepairJob[]>(() => {
     if (!user || !repairData) return [];
-    const jobs = scopeRepairsFor(repairData.jobs, {
+    return scopeRepairsFor(repairData.jobs, {
       role: user.role,
       customerId: user.customerId,
       technicianId: user.technicianId,
       branchId: user.branchId,
     });
-    return toRepairRows(jobs, { technicians: technicianNames(repairData.users) });
   }, [user, repairData]);
+  const scopedRepairs = useMemo<RepairRow[]>(
+    () => toRepairRows(scopedJobs, { technicians: technicianNames(repairData?.users ?? []) }),
+    [scopedJobs, repairData],
+  );
+  /** §6 — every dashboard figure derives from saved records. */
+  const figures = useMemo(() => {
+    const branchId = user?.role === "Admin" ? "" : user?.branchId ?? "";
+    const scoped = <T extends { branchId: string }>(rows: T[]) =>
+      branchId ? rows.filter((r) => r.branchId === branchId) : rows;
+    return computeDashboardFigures({
+      repairs: scopedJobs,
+      sales: scoped(repairData?.sales ?? []),
+      products: scoped(repairData?.products ?? []),
+    });
+  }, [scopedJobs, repairData, user]);
 
   // §2 — hash-based routing. A hash never reaches the server, so reload and
   // shared links work on any static host without a rewrite rule.
@@ -253,7 +274,7 @@ function App() {
             </div>
           </div>
 
-          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs}/> : <RoleDashboard user={user} data={scopedRepairs} navigate={navigate}/>)}
+          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures}/> : <RoleDashboard user={user} data={scopedRepairs} navigate={navigate}/>)}
           {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
           {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
           {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
@@ -354,14 +375,17 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
   </div>;
 }
 
-function Dashboard({ navigate, data }: { navigate: (p: string) => void; data: RepairRow[] }) {
+function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void; data: RepairRow[]; figures: DashboardFigures }) {
+  /**
+   * §6 — every figure comes from saved records. The two tiles the old
+   * dashboard had for "Outstanding" and "Today's Expenses" are gone rather
+   * than faked: there is no invoice or expense module behind them yet.
+   */
   const kpis = [
-    ["Today's Sales", "Rs. 184,500", "+12.4%", "sale", "blue"],
-    ["Active Repairs", "38", "+6 today", "tool", "purple"],
-    ["Ready for Pickup", "12", "Rs. 146K value", "check", "cyan"],
-    ["Outstanding", "Rs. 326,400", "18 invoices", "wallet", "pink"],
-    ["Low Stock Items", "8", "3 critical", "alert", "amber"],
-    ["Today's Expenses", "Rs. 24,800", "−8.2%", "receipt", "slate"],
+    ["Today's Sales", formatLKR(figures.todaySales), `${figures.todaySaleCount} sale${figures.todaySaleCount === 1 ? "" : "s"} today`, "sale", "blue"],
+    ["Active Repairs", String(figures.activeRepairs), `${figures.unassignedRepairs} unassigned`, "tool", "purple"],
+    ["Ready for Pickup", String(figures.readyForPickup), `${figures.awaitingApproval} awaiting approval`, "check", "cyan"],
+    ["Low Stock Items", String(figures.lowStockItems), `${figures.criticalStockItems} critical`, "alert", "amber"],
   ] as const;
   return <>
     <div className="kpi-grid">
@@ -374,8 +398,8 @@ function Dashboard({ navigate, data }: { navigate: (p: string) => void; data: Re
     </div>
     <div className="dashboard-grid">
       <Card className="sales-chart">
-        <div className="card-head"><div><h2>Sales overview</h2><p>Revenue performance across all channels</p></div><div className="segments"><button>7D</button><button className="active">30D</button><button>12M</button></div></div>
-        <div className="chart-meta"><div><span className="legend purple"/><small>Revenue</small><strong>Rs. 1.84M</strong></div><div><span className="legend blue"/><small>Payments</small><strong>Rs. 1.52M</strong></div></div>
+        <div className="card-head"><div><h2>Sales overview</h2><p>Illustrative curve &mdash; the figures beside it are real; a reporting module will replace the chart</p></div><div className="segments"><button>7D</button><button className="active">30D</button><button>12M</button></div></div>
+        <div className="chart-meta"><div><span className="legend purple"/><small>Sales today</small><strong>{formatLKR(figures.todaySales)}</strong></div><div><span className="legend blue"/><small>Active repairs</small><strong>{figures.activeRepairs}</strong></div></div>
         <div className="line-chart">
           <div className="y-labels"><span>200K</span><span>150K</span><span>100K</span><span>50K</span><span>0</span></div>
           <svg viewBox="0 0 700 220" preserveAspectRatio="none">
