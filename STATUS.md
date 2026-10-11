@@ -3,7 +3,7 @@
 Inspection performed against the master specification. Every claim below was
 produced by a command run on this checkout, not assumed.
 
-**Branch** `arena/ccac4826-fixflow` · **HEAD** `b30cad2` · app lives in
+**Branch** `arena/ccac4826-fixflow` · **HEAD** `68bb96f` · app lives in
 `FixFlow UI Design/` (note the space in the folder name).
 
 > Re-inspected after the repair, POS and routing work. Sections 1–3 below now
@@ -56,29 +56,35 @@ attributes in `App.tsx` contain a Tailwind utility. The UI is hand-written CSS
 (~560 lines) driven by CSS custom properties. Tailwind is a declared
 dependency that does almost nothing.
 
-## 5. Screen coverage — 14 real, 36 stubs
+## 5. Screen coverage — 14 real screens, 38 nav stubs
 
-50 nav labels are defined. **14** have a render branch (verified by grepping
-`page === "..."` in `App.tsx`):
+`App.tsx` defines **50** nav labels. The stub fallback at `App.tsx:315` lists
+the pages that have a render branch — **14** of them:
 
-`Dashboard · Repairs · Repair Board · Repair Details · New Repair · My Repairs ·
-My Repair Details · Diagnosis · AI Diagnosis · POS · Inventory · Products ·
-Notifications · AI Assistant`
+`Dashboard · Repairs · My Repairs · Repair Board · New Repair · Repair Details ·
+My Repair Details · POS · Inventory · AI Diagnosis · Diagnosis · Cash Register ·
+Sales · Refunds`
 
-Of those, the ones that now read and write **saved records** rather than
-hardcoded arrays are: Repairs, Repair Board, Repair Details, My Repairs, New
-Repair and POS. Dashboard, Diagnosis, AI Diagnosis and Notifications are still
-static.
+Twelve of those are reachable from the sidebar. `Repair Details` and
+`My Repair Details` are not nav items — they are reached by clicking a row, and
+are routed as `#/admin/repair-details/FX-2026-004821`.
 
-**36 are stubs** — a nav item with no screen behind it:
+Every one of the 14 reads and writes **saved records**. There is no longer a
+screen that renders a hardcoded array. `Inventory` and `Refunds` share the
+`ProductsPage` and `SalesPage` components respectively rather than duplicating
+them.
 
-> Audit Log, Branch Operations, Branches, Cash Register, Cashbook, Customer
-> Portal, Customers, Estimates, Expenses, Finance, Integration Settings,
-> Invoices, Paid Deliveries, Parts, Payables, Payment & warranty, Payments,
-> Permissions, Profile, Purchase Orders, Receivables, Refunds, Repair History,
-> Repair intake, Reports, Sales, Settings, Smart diagnosis, Stock Adjustments,
-> Stock Transfers, Suppliers, Support, Team, Testing, User Management,
-> Warranty, Warranty Claims, Workflow Settings
+**38 nav labels are stubs** — a sidebar entry with no screen behind it. Since
+`d2e810b` they render a plain "not built yet" state instead of inventing record
+counts and claiming to be connected:
+
+> Audit Log, Branch Operations, Branches, Cashbook, Customer Portal, Customers,
+> Estimates, Expenses, Finance, Integration Settings, Invoices, Paid
+> Deliveries, Parts, Payables, Payment & warranty, Payments, Permissions,
+> Profile, Purchase Orders, Receivables, Repair History, Repair intake,
+> Reports, Settings, Smart diagnosis, Stock Adjustments, Stock Transfers,
+> Suppliers, Support, Team, Testing, User Management, Warranty, Warranty
+> Claims, Workflow Settings
 
 ## 6. Modules present vs §7–§25
 
@@ -174,11 +180,35 @@ that is not the same as proving the screen calls them.
   exist. `Badge` derives its class from the label text, so any *new* status
   label will still render unstyled until a rule is added.
 
+**Also fixed in `bc9b771..68bb96f`:**
+
+- ~~Cash register was a fabricated card~~ — sessions open with a float and
+  close against a counted balance; expected cash is derived from cash sales and
+  refunds inside the session window, and variance is computed, never stored.
+- ~~Notifications were a static per-role script~~ naming job numbers unrelated
+  to the signed-in user — now derived from repairs and products, scoped by
+  role, and empty when there is nothing to report.
+- ~~Stub screens claimed "248 active records" and "connected and ready"~~ — they
+  now say plainly that the page is not built.
+- ~~The customer portal showed everyone "Rs. 18,500" and "43 days"~~ — pending
+  quotes and outstanding balance are now that customer's own; the warranty card
+  is removed because there are no warranty records.
+- ~~The portal progress bar showed steps 1-3 complete for everyone~~ — it now
+  uses `customerProgress` on the repair's real status, so it agrees with the
+  repair details page.
+- ~~The repairs filter bar did not filter~~ and the pager could not page — the
+  search, status and technician filters work; the pager became an honest count.
+- ~~"Hold sale" and "Add customer" in the POS had no `onClick`~~ — parked carts
+  hold, resume and discard; a sale can carry a customer.
+- ~~The header date was hardcoded and wrong~~ ("Monday, March 18" — 18 March
+  2026 is a Wednesday) — it comes from the clock now. The chart's 7D/30D/12M
+  toggle was removed: there is no series behind it.
+
 **Still open:**
 
 - The sales chart is an illustrative SVG curve; the card says so, and only the
   figures beside it are real.
-- 34 sidebar labels still have no screen. They now say so plainly instead of
+- 38 sidebar labels still have no screen. They say so plainly instead of
   inventing figures and claiming to be connected.
 - There is no barcode scanner input; the POS search matches barcode text.
 - Estimates, invoices, payments, suppliers, warranties, finance, reports and
