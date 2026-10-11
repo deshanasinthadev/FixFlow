@@ -47,6 +47,26 @@ describe('seeded business data', () => {
     }
   })
 
+  it('resolves a customer by their portal token (§11, §20)', async () => {
+    const customers = await db.customers.list()
+    const target = customers[0]
+
+    const resolved = await db.customers.byPortalToken(target.portalToken)
+    expect(resolved?.id).toBe(target.id)
+  })
+
+  it('does not resolve a token that belongs to nobody', async () => {
+    // A forged or mistyped token must come back empty rather than falling
+    // through to the first row in the table.
+    expect(await db.customers.byPortalToken('ptk_nobody_at_all')).toBeUndefined()
+  })
+
+  it('does not resolve an empty token', async () => {
+    // Without this, an empty string would query the index for '' and any
+    // customer stored with a blank token would match every visitor.
+    expect(await db.customers.byPortalToken('')).toBeUndefined()
+  })
+
   it('gives every customer an unguessable portal token (§20)', async () => {
     const customers = await db.customers.list()
     const tokens = new Set(customers.map((c) => c.portalToken))

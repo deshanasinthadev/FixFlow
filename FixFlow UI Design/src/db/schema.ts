@@ -85,4 +85,29 @@ export type ImportBatch = z.infer<typeof ImportBatch>
 export const newId = (prefix: string) =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
 
+/**
+ * A secret, not an identifier.
+ *
+ * `newId` above is fine for row ids — they are looked up, never guessed at. A
+ * portal token is different: holding it is what proves you are the customer
+ * (§11, §20), so it has to come from the platform CSPRNG. `Math.random()` is a
+ * deterministic PRNG whose output can be predicted from a few observed values,
+ * which would make one customer's token enough to work out another's.
+ *
+ * 32 hex characters is 128 bits — far past brute-forceable, and long enough
+ * that a collision is not a practical concern.
+ */
+export const newSecret = (prefix: string): string => {
+  const bytes = new Uint8Array(16)
+  // Available in browsers and in Node 19+ without an import; falls back only
+  // where neither exists, which in practice is a very old test runner.
+  const crypto_ = globalThis.crypto
+  if (crypto_?.getRandomValues) {
+    crypto_.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256)
+  }
+  return `${prefix}_${[...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
 export const nowIso = () => new Date().toISOString()

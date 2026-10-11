@@ -11,7 +11,7 @@ import { ExpensesPage } from "./modules/finance/ExpensesPage";
 import { ReportsPage } from "./modules/finance/ReportsPage";
 import { WarrantyPage } from "./modules/warranty/WarrantyPage";
 import { AuditLogPage } from "./modules/audit/AuditLogPage";
-import { can, requirePermission } from "./domain/permissions";
+import { can, canCustomerAccess, requirePermission } from "./domain/permissions";
 import { permissionForPage } from "./domain/pageAccess";
 import { deriveNotifications } from "./modules/notifications/derive";
 import { toCsv } from "./csv/pipeline";
@@ -436,9 +436,11 @@ function App() {
 }
 
 function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boolean) => void; onLogin: (user: User, remember: boolean) => void }) {
-  const [mode, setMode] = useState<"login" | "forgot" | "reset" | "success">("login");
+  const { db } = useDb();
+  const [mode, setMode] = useState<"login" | "forgot" | "reset" | "success" | "portal">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [portalToken, setPortalToken] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(true);
@@ -459,6 +461,43 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
       setLoading(false);
     }, 650);
   };
+  /**
+   * §11, §20 — customer portal sign-in.
+   *
+   * The token is the only credential: there is no password to leak and nothing
+   * to reset. It is looked up rather than compared against a known list, and
+   * `canCustomerAccess` then confirms the record it resolved to is really the
+   * one that owns that token — a second check, so a lookup bug cannot hand one
+   * customer another's records.
+   *
+   * The token never appears in a URL, because a link a customer forwards would
+   * otherwise carry their whole history with it.
+   */
+  const submitPortal = async () => {
+    const token = portalToken.trim();
+    if (!token) { setError("Enter the portal link code from your invoice or SMS."); return; }
+    setError("");
+    setLoading(true);
+    try {
+      const customer = await db.customers.byPortalToken(token);
+      if (!customer || !canCustomerAccess(token, customer.id, customer.portalToken)) {
+        setError("That portal code is not recognised. Check the link from your invoice or text message.");
+        return;
+      }
+      onLogin({
+        id: customer.id,
+        customerId: customer.id,
+        name: customer.fullName,
+        email: customer.email,
+        role: "Customer",
+        branchId: "",
+        branch: "Customer portal",
+      }, remember);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const selectDemo = (role: Role) => {
     setEmail(demoUsers[role].email);
     setPassword("Demo@123");
@@ -495,6 +534,19 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
           <div className="demo-divider"><span>Prototype demo accounts</span></div>
           <div className="demo-roles">{(Object.keys(demoUsers) as Role[]).map((role) => <button className={email === demoUsers[role].email ? "selected" : ""} onClick={() => selectDemo(role)} key={role}><span><Icon name={role === "Admin" ? "shield" : role === "Manager" ? "branch" : role === "Technician" ? "tool" : role === "Cashier" ? "cash" : "users"}/></span><strong>{role}</strong><small>{role === "Customer" ? "Portal" : role === "Technician" ? "Repairs" : role === "Cashier" ? "POS" : role === "Manager" ? "Branch" : "Full access"}</small></button>)}</div>
           <p className="demo-hint">Demo password: <strong>Demo@123</strong></p>
+          <div className="demo-divider"><span>or</span></div>
+          <Button kind="secondary" icon="users" onClick={() => { setMode("portal"); setError(""); }}>Track a repair as a customer</Button>
+        </>}
+        {mode === "portal" && <>
+          <button className="auth-back" onClick={() => { setMode("login"); setError(""); }}><Icon name="chevron" size={15}/> Back to sign in</button>
+          <div className="login-heading"><span>CUSTOMER PORTAL</span><h2>Track your repair</h2><p>Paste the portal code from your invoice or the text message we sent you. No password needed.</p></div>
+          {error && <div className="login-error"><Icon name="alert"/><span><strong>Unable to open the portal</strong>{error}</span></div>}
+          <label>Portal code<div className="auth-input"><Icon name="shield"/><input value={portalToken} onChange={(event) => setPortalToken(event.target.value)} placeholder="ptk_cus_…" autoFocus/></div></label>
+          <Button onClick={submitPortal}>{loading ? <><span className="spinner"/>Opening…</> : "Open my portal"}</Button>
+          <p className="demo-hint">
+            The code is the only credential, and it is never put in a link you could forward by accident. If you have
+            lost it, ask the branch that took your device in and they will send a new one.
+          </p>
         </>}
         {mode === "forgot" && <>
           <button className="auth-back" onClick={() => setMode("login")}><Icon name="chevron" size={15}/> Back to sign in</button>

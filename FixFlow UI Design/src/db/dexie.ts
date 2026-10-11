@@ -88,6 +88,7 @@ import {
   Product,
   StockMovement,
   newId,
+  newSecret,
   nowIso,
   type ImportBatch as ImportBatchT,
   type Product as ProductT,
@@ -635,7 +636,7 @@ export function createDb(name: string = DB_NAME): Db {
           id,
           // Sequential code is cosmetic; the portal token is the real handle.
           code: `C-${String(Date.now()).slice(-5)}`,
-          portalToken: `ptk_${id}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`,
+          portalToken: newSecret('ptk'),
           createdAt: nowIso(),
         }
         await raw.customers.add(customer)
