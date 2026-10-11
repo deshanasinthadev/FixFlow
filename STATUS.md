@@ -3,7 +3,7 @@
 Inspection performed against the master specification. Every claim below was
 produced by a command run on this checkout, not assumed.
 
-**Branch** `arena/ccac4826-fixflow` · **HEAD** `8449161` · app lives in
+**Branch** `arena/ccac4826-fixflow` · **HEAD** `07f6a09` · app lives in
 `FixFlow UI Design/` (note the space in the folder name).
 
 > Re-inspected after the repair, POS and routing work. Sections 1–3 below now
@@ -88,7 +88,7 @@ static.
 | Inventory (§11) | **Built and tested** — `src/db/`, `src/csv/`, `src/modules/products/`; CSV import/export with undo; 18 repository tests + 30 CSV tests |
 | POS (§10) | **Built and tested** — `db.sales.checkout` is one transaction: validates availability, decrements stock, writes a movement per line naming the sale, supports an idempotency key. Refunds reference the original sale and never edit it. Stock reservations added so reserved units cannot be sold twice. 39 tests. The screen sells real stock. Still missing: cash sessions, hold/park, receipt printing. |
 | Customers / Devices (§13–14) | **Persistence built, screens absent** — `customers` and `devices` tables, seeded, with unguessable portal tokens (`ptk_<id>_<32hex>`); created through the intake wizard. No customer list or detail screen yet. |
-| Estimates & approvals (§9) | ❌ absent |
+| Estimates & approvals (§9) | **Persistence built and tested, no UI** — full draft → sent → approved/rejected → revised lifecycle, approvals recorded as their own record (§28.13), revisions supersede rather than overwrite. `changeStatus` now refuses to start work with no recorded approval. 31 tests. The Estimates nav item is still a stub. |
 | Suppliers & purchasing (§12) | ❌ absent |
 | Invoices & documents (§15) | ❌ absent |
 | Payments (§16) | ❌ absent (see §7 note) |
@@ -130,13 +130,14 @@ in `App.tsx`.
 
 ## 9. Tests
 
-**372 passing across 9 files** (verified with `pnpm vitest run`):
+**403 passing across 10 files** (verified with `pnpm vitest run`):
 
 | File | Tests | Covers |
 | --- | ---: | --- |
 | `src/domain/domain.test.ts` | 96 | calculations, workflows, permissions, validation |
 | `src/utils/firebase-logic.test.ts` | 58 | framework-free finance/validation logic |
 | `src/db/business.test.ts` | 50 | branches, users, customers, devices, repairs, history |
+| `src/db/estimates.test.ts` | 31 | estimates, approvals, revisions, the work-start gate |
 | `src/db/pos.test.ts` | 39 | checkout, stock integrity, idempotency, refunds, reservations |
 | `src/modules/repairs/repairView.test.ts` | 48 | record → row adapter, role scoping, board columns, customer progress |
 | `src/csv/pipeline.test.ts` | 30 | CSV import/export |
@@ -180,6 +181,8 @@ that is not the same as proving the screen calls them.
 - `prefers-reduced-motion` has **0** matches in `index.css` (§29).
 - Tax is seeded as disabled but `LK_STANDARD_VAT = 18` is still hardcoded per
   product in `seed.ts` (§3).
+- Estimates have no screen. The rules and persistence are tested; a user cannot
+  yet quote or approve from the UI.
 - Two repair state machines coexist: the legacy `repairService.ALLOWED_TRANSITIONS`
   (8 statuses, Firebase layer) and the canonical `domain/workflows.ts
   REPAIR_TRANSITIONS` (11 statuses). Dexie enforces the canonical one. They
