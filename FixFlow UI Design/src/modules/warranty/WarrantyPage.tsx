@@ -272,7 +272,7 @@ export function WarrantyPage({ branchId, actorId }: {
                           disabled={busy}
                           onClick={() => {
                             const reason = window.prompt('Withdraw this cover? Record why:')
-                            if (reason !== null) void run('Cover withdrawn.', () => db.warranty.void(w.id, reason))
+                            if (reason !== null) void run('Cover withdrawn.', () => db.warranty.void(w.id, reason, actorId))
                           }}
                         >
                           Withdraw

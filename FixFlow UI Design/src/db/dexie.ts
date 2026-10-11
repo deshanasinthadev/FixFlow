@@ -7,6 +7,7 @@ import type {
   HeldSale,
   Device,
   Estimate,
+  AuditLogEntry,
   EstimateItem,
   EstimateStatus,
   Expense,
@@ -76,6 +77,8 @@ import type {
   WarrantyClaimDecisionInput,
   WarrantyClaimInput,
   WarrantyInput,
+  AuditEntryInput,
+  AuditFilter,
   WarrantyPolicyInput,
   SaleFilter,
   StockAdjust,
@@ -132,6 +135,8 @@ export function createDb(name: string = DB_NAME): Db {
     /** §17 — issued cover; the row is the contract, not the policy */
     warranties!: Table<Warranty, string>
     warrantyClaims!: Table<WarrantyClaim, string>
+    /** §23 — who did what, when. Append-only. */
+    auditLog!: Table<AuditLogEntry, string>
     sales!: Table<Sale, string>
     refunds!: Table<Refund, string>
     reservations!: Table<StockReservation, string>
@@ -194,6 +199,10 @@ export function createDb(name: string = DB_NAME): Db {
         warrantyPolicies: 'id, name, appliesTo',
         warranties: 'id, warrantyNumber, policyId, customerId, productId, repairId, expiresAt, status, createdAt',
         warrantyClaims: 'id, claimNumber, warrantyId, customerId, repairId, status, createdAt',
+      })
+      // §23 — the audit trail. Append-only: nothing edits or deletes a row.
+      this.version(10).stores({
+        auditLog: 'id, actorId, action, targetType, targetId, branchId, at',
       })
     }
   }
@@ -833,7 +842,7 @@ export function createDb(name: string = DB_NAME): Db {
 
         return raw.transaction(
           'rw',
-          [raw.repairParts, raw.repairs, raw.products, raw.movements, raw.reservations],
+          [raw.repairParts, raw.repairs, raw.products, raw.movements, raw.reservations, raw.auditLog, raw.users],
           async () => {
             const repair = await raw.repairs.get(input.repairId)
             if (!repair) throw new Error(`No repair ${input.repairId}`)
@@ -907,6 +916,18 @@ export function createDb(name: string = DB_NAME): Db {
               }),
             )
             await raw.repairParts.add(usage)
+            // §23 — stock left the shelf for a repair.
+            await raw.auditLog.add({
+              id: newId('aud'),
+              actorId: input.actorId,
+              actorName: (await raw.users.get(input.actorId))?.fullName ?? input.actorId,
+              action: 'repair.part_added',
+              targetType: 'repair',
+              targetId: input.repairId,
+              detail: `${quantity} × ${product.name} on ${repair.jobNumber}`,
+              branchId: repair.branchId,
+              at: nowIso(),
+            })
             return usage
           },
         )
@@ -1098,7 +1119,7 @@ export function createDb(name: string = DB_NAME): Db {
       async refund(saleId: string, input: RefundInput): Promise<Refund> {
         if (!input.reason.trim()) throw new Error('A refund needs a reason.')
 
-        return raw.transaction('rw', [raw.sales, raw.refunds, raw.products, raw.movements], async () => {
+        return raw.transaction('rw', [raw.sales, raw.refunds, raw.products, raw.movements, raw.auditLog, raw.users], async () => {
           const sale = await raw.sales.get(saleId)
           if (!sale) throw new Error(`No sale ${saleId}`)
 
@@ -1153,6 +1174,18 @@ export function createDb(name: string = DB_NAME): Db {
 
           // §28.18 — the original sale is never edited or deleted.
           await raw.refunds.add(refund)
+          // §23 — money leaving the till is exactly what the trail exists for.
+          await raw.auditLog.add({
+            id: newId('aud'),
+            actorId: input.approvedBy,
+            actorName: (await raw.users.get(input.approvedBy))?.fullName ?? input.approvedBy,
+            action: 'sale.refunded',
+            targetType: 'sale',
+            targetId: saleId,
+            detail: `Refunded Rs. ${(amount / 100).toFixed(2)}${input.restoreStock ? ', stock restored' : ', stock kept'}. Reason: ${input.reason}`,
+            branchId: sale.branchId,
+            at: nowIso(),
+          })
           return refund
         })
       },
@@ -1239,7 +1272,7 @@ export function createDb(name: string = DB_NAME): Db {
       },
 
       async send(id: string, actorId: string): Promise<Estimate> {
-        return raw.transaction('rw', [raw.estimates], async () => {
+        return raw.transaction('rw', [raw.estimates, raw.auditLog, raw.users], async () => {
           const estimate = await raw.estimates.get(id)
           if (!estimate) throw new Error(`No estimate ${id}`)
           if (!canTransitionEstimate(estimate.status, 'sent')) {
@@ -1247,9 +1280,20 @@ export function createDb(name: string = DB_NAME): Db {
               `An estimate that is ${ESTIMATE_STATUS_LABEL[estimate.status]} cannot be sent.`,
             )
           }
-          void actorId
           const next: Estimate = { ...estimate, status: 'sent' }
           await raw.estimates.put(next)
+          // §23 — an estimate going to a customer is a promise being made.
+          await raw.auditLog.add({
+            id: newId('aud'),
+            actorId,
+            actorName: (await raw.users.get(actorId))?.fullName ?? actorId,
+            action: 'estimate.sent',
+            targetType: 'estimate',
+            targetId: id,
+            detail: `${estimate.estimateNumber} sent for Rs. ${(estimate.total / 100).toFixed(2)}`,
+            branchId: estimate.branchId,
+            at: nowIso(),
+          })
           return next
         })
       },
@@ -1422,22 +1466,33 @@ export function createDb(name: string = DB_NAME): Db {
       },
 
       async issue(id: string, actorId: string): Promise<InvoiceWithBalance> {
-        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+        return raw.transaction('rw', [raw.invoices, raw.payments, raw.auditLog, raw.users], async () => {
           const invoice = await raw.invoices.get(id)
           if (!invoice) throw new Error(`No invoice ${id}`)
           if (invoice.status !== 'draft') {
             throw new Error(`An invoice that is ${invoice.status.replace('_', ' ')} cannot be issued.`)
           }
-          void actorId
           const next: Invoice = { ...invoice, status: 'issued' }
           await raw.invoices.put(next)
+          // §23 — issuing an invoice creates a receivable.
+          await raw.auditLog.add({
+            id: newId('aud'),
+            actorId,
+            actorName: (await raw.users.get(actorId))?.fullName ?? actorId,
+            action: 'invoice.issued',
+            targetType: 'invoice',
+            targetId: id,
+            detail: `${invoice.invoiceNumber} issued for Rs. ${(invoice.total / 100).toFixed(2)}`,
+            branchId: invoice.branchId,
+            at: nowIso(),
+          })
           return withBalance(next)
         })
       },
 
       async cancel(id: string, actorId: string, reason: string): Promise<InvoiceWithBalance> {
         if (!reason.trim()) throw new Error('Record why the invoice is being voided.')
-        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+        return raw.transaction('rw', [raw.invoices, raw.payments, raw.auditLog, raw.users], async () => {
           const invoice = await raw.invoices.get(id)
           if (!invoice) throw new Error(`No invoice ${id}`)
           if (invoice.status === 'cancelled') throw new Error('That invoice is already voided.')
@@ -1453,10 +1508,22 @@ export function createDb(name: string = DB_NAME): Db {
             )
           }
 
-          void actorId
           // §28.18 — the row and its payments are preserved, never deleted.
           const next: Invoice = { ...invoice, status: 'cancelled' }
           await raw.invoices.put(next)
+          // §23 — voiding an invoice removes a receivable; that needs a name
+          // against it.
+          await raw.auditLog.add({
+            id: newId('aud'),
+            actorId,
+            actorName: (await raw.users.get(actorId))?.fullName ?? actorId,
+            action: 'invoice.voided',
+            targetType: 'invoice',
+            targetId: id,
+            detail: `${invoice.invoiceNumber} voided. Reason: ${reason}`,
+            branchId: invoice.branchId,
+            at: nowIso(),
+          })
           return withBalance(next)
         })
       },
@@ -1484,7 +1551,7 @@ export function createDb(name: string = DB_NAME): Db {
           throw new Error('Enter a payment amount greater than zero.')
         }
 
-        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+        return raw.transaction('rw', [raw.invoices, raw.payments, raw.auditLog, raw.users], async () => {
           // §28.11 — a payment must reference an invoice.
           const invoice = await raw.invoices.get(input.invoiceId)
           if (!invoice) throw new Error(`No invoice ${input.invoiceId}`)
@@ -1525,7 +1592,7 @@ export function createDb(name: string = DB_NAME): Db {
       },
 
       async refund(invoiceId: string, paymentId: string, actorId: string): Promise<Payment> {
-        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+        return raw.transaction('rw', [raw.invoices, raw.payments, raw.auditLog, raw.users], async () => {
           const original = await raw.payments.get(paymentId)
           if (!original) throw new Error(`No payment ${paymentId}`)
           if (original.invoiceId !== invoiceId) {
@@ -1580,7 +1647,7 @@ export function createDb(name: string = DB_NAME): Db {
         if (!input.spentAt || Number.isNaN(Date.parse(input.spentAt))) {
           throw new Error('An expense needs a valid date.')
         }
-        return raw.transaction('rw', [raw.expenses], async () => {
+        return raw.transaction('rw', [raw.expenses, raw.auditLog, raw.users], async () => {
           const expense: Expense = {
             id: newId('exp'),
             branchId: input.branchId,
@@ -1600,7 +1667,7 @@ export function createDb(name: string = DB_NAME): Db {
 
       async reverse(id: string, actorId: string, reason: string): Promise<Expense> {
         if (!reason.trim()) throw new Error('Record why the expense is being reversed.')
-        return raw.transaction('rw', [raw.expenses], async () => {
+        return raw.transaction('rw', [raw.expenses, raw.auditLog, raw.users], async () => {
           const original = await raw.expenses.get(id)
           if (!original) throw new Error(`No expense ${id}`)
           if (original.amount < 0) throw new Error('That entry is already a reversal.')
@@ -1617,7 +1684,19 @@ export function createDb(name: string = DB_NAME): Db {
             createdAt: nowIso(),
           }
           await raw.expenses.add(reversal)
-          void reason
+          // §23 — a correction to the books leaves the original standing, so
+          // the trail has to explain why the pair exists.
+          await raw.auditLog.add({
+            id: newId('aud'),
+            actorId,
+            actorName: (await raw.users.get(actorId))?.fullName ?? actorId,
+            action: 'expense.reversed',
+            targetType: 'expense',
+            targetId: id,
+            detail: `Reversed Rs. ${(original.amount / 100).toFixed(2)} (${original.description}). Reason: ${reason}`,
+            branchId: original.branchId,
+            at: nowIso(),
+          })
           return reversal
         })
       },
@@ -1926,12 +2005,24 @@ export function createDb(name: string = DB_NAME): Db {
         return rows.filter((w) => isWarrantyActive(w) && isWarrantyExpiringSoon(w, new Date(), withinDays))
       },
 
-      async void(warrantyId: string, reason: string): Promise<void> {
+      async void(warrantyId: string, reason: string, actorId: string): Promise<void> {
         if (!reason.trim()) throw new Error('Record why the cover was withdrawn.')
         const existing = await raw.warranties.get(warrantyId)
         if (!existing) throw new Error(`No warranty ${warrantyId}`)
         if (existing.status === 'void') throw new Error('That cover is already withdrawn.')
         await raw.warranties.update(warrantyId, { status: 'void' })
+        // §23 — withdrawing cover from a customer is not a quiet act.
+        await raw.auditLog.add({
+          id: newId('aud'),
+          actorId,
+          actorName: (await raw.users.get(actorId))?.fullName ?? actorId,
+          action: 'warranty.voided',
+          targetType: 'warranty',
+          targetId: warrantyId,
+          detail: `${existing.warrantyNumber} withdrawn. Reason: ${reason}`,
+          branchId: '',
+          at: nowIso(),
+        })
       },
 
       claims: async () => raw.warrantyClaims.orderBy('createdAt').reverse().toArray(),
@@ -2046,6 +2137,41 @@ export function createDb(name: string = DB_NAME): Db {
           .filter((w) => w.warrantyNumber.startsWith(`${prefix}-${year}-`))
           .reduce((max, w) => Math.max(max, Number(w.warrantyNumber.split('-').pop()) || 0), 0)
         return `${prefix}-${year}-${String(highest + 1).padStart(4, '0')}`
+      },
+    },
+
+    // §23 — the audit trail. Append-only: there is deliberately no method here
+    // to edit or delete an entry. A log you can rewrite is not evidence.
+    audit: {
+      async record(input: AuditEntryInput): Promise<AuditLogEntry> {
+        if (!input.actorId) throw new Error('An audit entry needs to name who did it.')
+        if (!input.action.trim()) throw new Error('An audit entry needs an action.')
+        // The actor's name is denormalised onto the row on purpose: if a user is
+        // later renamed or removed, the trail must still say who acted at the
+        // time rather than showing a stale or blank label.
+        const actor = await raw.users.get(input.actorId)
+        const entry: AuditLogEntry = {
+          id: newId('aud'),
+          actorId: input.actorId,
+          actorName: actor ? `${actor.fullName} (${actor.role})` : input.actorId,
+          action: input.action.trim(),
+          targetType: input.targetType,
+          targetId: input.targetId,
+          detail: input.detail ?? '',
+          branchId: input.branchId ?? actor?.branchId ?? '',
+          at: nowIso(),
+        }
+        await raw.auditLog.add(entry)
+        return entry
+      },
+
+      async list(filter: AuditFilter = {}): Promise<AuditLogEntry[]> {
+        const rows = await raw.auditLog.orderBy('at').reverse().toArray()
+        return rows.filter((e) =>
+          (!filter.branchId || e.branchId === filter.branchId)
+          && (!filter.actorId || e.actorId === filter.actorId)
+          && (!filter.action || e.action === filter.action)
+          && (!filter.targetType || e.targetType === filter.targetType))
       },
     },
   }

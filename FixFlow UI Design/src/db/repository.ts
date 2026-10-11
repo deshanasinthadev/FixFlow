@@ -15,6 +15,7 @@ import type {
   PaymentStatus,
   PaymentMethodId,
   RepairJob,
+  AuditLogEntry,
   RepairPartUsage,
   Warranty,
   WarrantyClaim,
@@ -321,8 +322,8 @@ export interface Db {
     /** Cover ending within the given number of days, still live. */
     expiringSoon(withinDays?: number): Promise<Warranty[]>
 
-    /** Withdraw cover. Requires a reason; never a silent delete. */
-    void(warrantyId: string, reason: string): Promise<void>
+    /** Withdraw cover. Requires a reason and an actor; never a silent delete. */
+    void(warrantyId: string, reason: string, actorId: string): Promise<void>
 
     claims(): Promise<WarrantyClaim[]>
     claim(id: string): Promise<WarrantyClaim | undefined>
@@ -340,6 +341,20 @@ export interface Db {
     /** Close it out. */
     closeClaim(claimId: string): Promise<WarrantyClaim>
     nextWarrantyNumber(prefix: string): Promise<string>
+  }
+
+  /**
+   * Audit trail (§10, §23).
+   *
+   * Every write that changes money, stock, cover or a repair's state leaves a
+   * row here naming who did it. The trail is append-only; there is no method to
+   * edit or delete an entry, because a log you can rewrite is not evidence.
+   */
+  audit: {
+    /** Record what happened. */
+    record(input: AuditEntryInput): Promise<AuditLogEntry>
+    /** Newest first. */
+    list(filter?: AuditFilter): Promise<AuditLogEntry[]>
   }
 }
 
@@ -364,6 +379,29 @@ export interface EstimateInput {
   notes?: string
   expiresAt?: string
   actorId: string
+}
+
+/**
+ * §23 — an audit entry.
+ *
+ * Append-only. Nothing edits or deletes a row, so the trail cannot be made to
+ * agree with a later story. `detail` carries a summary of the change, never
+ * anything sensitive such as a password or a full card number.
+ */
+export interface AuditEntryInput {
+  actorId: string
+  action: string
+  targetType: string
+  targetId: string
+  detail?: string
+  branchId?: string
+}
+
+export interface AuditFilter {
+  branchId?: string
+  actorId?: string
+  action?: string
+  targetType?: string
 }
 
 /** §17 — the cover terms new warranties are sold under. */

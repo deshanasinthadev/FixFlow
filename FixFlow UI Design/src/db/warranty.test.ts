@@ -184,7 +184,7 @@ describe('warranty.list and status', () => {
     const cover = await policy(12)
     const buyer = await customer()
     const issued = await db.warranty.issue({ policyId: cover.id, customerId: buyer.id })
-    await db.warranty.void(issued.id, 'Device was returned for a refund.')
+    await db.warranty.void(issued.id, 'Device was returned for a refund.', 'usr_manager')
     const rows = await db.warranty.list()
     expect(rows[0].status).toBe('void')
   })
@@ -275,15 +275,15 @@ describe('warranty.void', () => {
     const cover = await policy(12)
     const buyer = await customer()
     const issued = await db.warranty.issue({ policyId: cover.id, customerId: buyer.id })
-    await expect(db.warranty.void(issued.id, '  ')).rejects.toThrow(/record why/i)
+    await expect(db.warranty.void(issued.id, '  ', 'usr_manager')).rejects.toThrow(/record why/i)
   })
 
   it('refuses to withdraw cover twice', async () => {
     const cover = await policy(12)
     const buyer = await customer()
     const issued = await db.warranty.issue({ policyId: cover.id, customerId: buyer.id })
-    await db.warranty.void(issued.id, 'Refunded.')
-    await expect(db.warranty.void(issued.id, 'Again.')).rejects.toThrow(/already withdrawn/i)
+    await db.warranty.void(issued.id, 'Refunded.', 'usr_manager')
+    await expect(db.warranty.void(issued.id, 'Again.', 'usr_manager')).rejects.toThrow(/already withdrawn/i)
   })
 })
 
@@ -318,7 +318,7 @@ describe('warranty claims', () => {
 
   it('refuses a claim against withdrawn cover', async () => {
     const issued = await liveWarranty()
-    await db.warranty.void(issued.id, 'Refunded.')
+    await db.warranty.void(issued.id, 'Refunded.', 'usr_manager')
     await expect(db.warranty.submitClaim({ warrantyId: issued.id, reportedIssue: 'Broken.' }))
       .rejects.toThrow(/withdrawn/)
   })
