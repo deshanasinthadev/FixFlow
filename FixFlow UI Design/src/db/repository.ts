@@ -1,7 +1,10 @@
 import type {
   Branch,
   Customer,
+  CustomerApproval,
   Device,
+  Estimate,
+  EstimateStatus,
   PaymentMethodId,
   RepairJob,
   RepairStatus,
@@ -151,6 +154,53 @@ export interface Db {
     list(): Promise<Refund[]>
     forSale(saleId: string): Promise<Refund[]>
   }
+
+  /** §9 — estimates and customer approvals. */
+  estimates: {
+    list(filter?: { repairId?: string; customerId?: string; branchId?: string; status?: EstimateStatus }): Promise<Estimate[]>
+    get(id: string): Promise<Estimate | undefined>
+    create(input: EstimateInput): Promise<Estimate>
+    /** Moves draft -> sent. Nothing can be approved before it is sent. */
+    send(id: string, actorId: string): Promise<Estimate>
+    /**
+     * §28.13 — records the approval itself, not just the resulting status, and
+     * moves the repair to `approved` in the same transaction.
+     */
+    decide(id: string, input: ApprovalInput): Promise<{ estimate: Estimate; approval: CustomerApproval }>
+    /**
+     * §9 — a revision supersedes the previous estimate and links to it. The
+     * old one is never edited or deleted, so the negotiation stays auditable.
+     */
+    revise(id: string, input: EstimateInput): Promise<Estimate>
+    nextEstimateNumber(branchId: string, year?: number): Promise<string>
+  }
+
+  approvals: {
+    forEstimate(estimateId: string): Promise<CustomerApproval[]>
+    forRepair(repairId: string): Promise<CustomerApproval[]>
+    /** True when the repair has an approval that has not been rejected. */
+    hasApprovalFor(repairId: string): Promise<boolean>
+  }
+}
+
+export interface EstimateInput {
+  repairId: string
+  items: { productId?: string; description: string; quantity: number; unitPrice: number }[]
+  /** Minor units. */
+  labourCost?: number
+  discount?: number
+  taxRate?: number
+  taxEnabled?: boolean
+  notes?: string
+  expiresAt?: string
+  actorId: string
+}
+
+export interface ApprovalInput {
+  decision: 'approved' | 'rejected'
+  method: CustomerApproval['method']
+  recordedBy: string
+  note?: string
 }
 
 export interface SaleFilter {

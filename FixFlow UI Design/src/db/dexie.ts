@@ -2,7 +2,11 @@ import Dexie, { type Table } from 'dexie'
 import type {
   Branch,
   Customer,
+  CustomerApproval,
   Device,
+  Estimate,
+  EstimateItem,
+  EstimateStatus,
   Refund,
   RepairJob,
   RepairStatus,
@@ -13,9 +17,17 @@ import type {
   User,
 } from '../domain/types'
 import { checkStockAvailability, computeDocument, sumLines } from '../domain/calculations'
+import {
+  assertEstimateRevision,
+  canRecordApproval,
+  canTransitionEstimate,
+  ESTIMATE_STATUS_LABEL,
+} from '../domain/workflows'
 import type {
+  ApprovalInput,
   CheckoutInput,
   CustomerInput,
+  EstimateInput,
   Db,
   DeviceInput,
   DuplicateStrategy,
@@ -76,6 +88,8 @@ export function createDb(name: string = DB_NAME): Db {
     sales!: Table<Sale, string>
     refunds!: Table<Refund, string>
     reservations!: Table<StockReservation, string>
+    estimates!: Table<Estimate, string>
+    approvals!: Table<CustomerApproval, string>
 
     constructor() {
       super(name)
@@ -96,6 +110,11 @@ export function createDb(name: string = DB_NAME): Db {
         sales: 'id, receiptNumber, branchId, cashierId, customerId, idempotencyKey, createdAt',
         refunds: 'id, originalSaleId, createdAt',
         reservations: 'id, productId, repairId',
+      })
+      // Version 3 adds estimates and the approvals recorded against them.
+      this.version(3).stores({
+        estimates: 'id, estimateNumber, repairId, customerId, branchId, status, createdAt',
+        approvals: 'id, estimateId, repairId, at',
       })
     }
   }
@@ -180,6 +199,18 @@ export function createDb(name: string = DB_NAME): Db {
     const highest = all
       .filter((sale) => sale.receiptNumber.startsWith(prefix))
       .reduce((max, sale) => Math.max(max, Number(sale.receiptNumber.slice(prefix.length)) || 0), 0)
+    return `${prefix}${String(highest + 1).padStart(4, '0')}`
+  }
+
+  /** Next estimate number for a branch, e.g. EST-CMB-2026-0001. */
+  async function nextEstimateNumber(branchId: string, year = new Date().getFullYear()): Promise<string> {
+    const branch = await raw.branches.get(branchId)
+    const code = (branch?.code ?? 'BR').toUpperCase()
+    const prefix = `EST-${code}-${year}-`
+    const all = await raw.estimates.toArray()
+    const highest = all
+      .filter((e) => e.estimateNumber.startsWith(prefix))
+      .reduce((max, e) => Math.max(max, Number(e.estimateNumber.slice(prefix.length)) || 0), 0)
     return `${prefix}${String(highest + 1).padStart(4, '0')}`
   }
 
@@ -845,6 +876,188 @@ export function createDb(name: string = DB_NAME): Db {
     refunds: {
       list: () => raw.refunds.orderBy('createdAt').reverse().toArray(),
       forSale: (saleId) => raw.refunds.where('originalSaleId').equals(saleId).toArray(),
+    },
+
+    // --- estimates and approvals (§9) --------------------------------------
+
+    estimates: {
+      async list(filter: { repairId?: string; customerId?: string; branchId?: string; status?: EstimateStatus } = {}) {
+        let rows = await raw.estimates.toArray()
+        if (filter.repairId) rows = rows.filter((e) => e.repairId === filter.repairId)
+        if (filter.customerId) rows = rows.filter((e) => e.customerId === filter.customerId)
+        if (filter.branchId) rows = rows.filter((e) => e.branchId === filter.branchId)
+        if (filter.status) rows = rows.filter((e) => e.status === filter.status)
+        return rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      },
+
+      get: (id) => raw.estimates.get(id),
+
+      async create(input: EstimateInput): Promise<Estimate> {
+        return raw.transaction('rw', [raw.estimates, raw.repairs, raw.branches, raw.customers], async () => {
+          const repair = await raw.repairs.get(input.repairId)
+          if (!repair) throw new Error(`No repair ${input.repairId}`)
+
+          const items: EstimateItem[] = input.items.map((line) => {
+            const qty = Math.round(line.quantity)
+            if (!Number.isInteger(qty) || qty <= 0) {
+              throw new Error(`"${line.description}" needs a positive whole-number quantity.`)
+            }
+            if (!line.description.trim()) throw new Error('Every estimate line needs a description.')
+            return {
+              id: newId('esi'),
+              productId: line.productId ?? '',
+              description: line.description.trim(),
+              quantity: qty,
+              unitPrice: line.unitPrice,
+              lineTotal: line.unitPrice * qty,
+            }
+          })
+          if (!items.length && !(input.labourCost ?? 0)) {
+            throw new Error('An estimate needs at least one line or a labour charge.')
+          }
+
+          const totals = computeDocument(
+            {
+              labourCost: input.labourCost ?? 0,
+              partsCost: sumLines(items),
+              discount: input.discount ?? 0,
+              taxRate: input.taxRate ?? 0,
+            },
+            input.taxEnabled ?? true,
+          )
+
+          const estimate: Estimate = {
+            id: newId('est'),
+            estimateNumber: await nextEstimateNumber(repair.branchId),
+            repairId: repair.id,
+            customerId: repair.customerId,
+            branchId: repair.branchId,
+            items,
+            labourCost: input.labourCost ?? 0,
+            discount: totals.discount,
+            taxRate: totals.taxRate,
+            taxAmount: totals.taxAmount,
+            total: totals.total,
+            status: 'draft',
+            notes: input.notes ?? '',
+            supersededBy: '',
+            expiresAt: input.expiresAt ?? '',
+            createdAt: nowIso(),
+          }
+          await raw.estimates.add(estimate)
+          return estimate
+        })
+      },
+
+      async send(id: string, actorId: string): Promise<Estimate> {
+        return raw.transaction('rw', [raw.estimates], async () => {
+          const estimate = await raw.estimates.get(id)
+          if (!estimate) throw new Error(`No estimate ${id}`)
+          if (!canTransitionEstimate(estimate.status, 'sent')) {
+            throw new Error(
+              `An estimate that is ${ESTIMATE_STATUS_LABEL[estimate.status]} cannot be sent.`,
+            )
+          }
+          void actorId
+          const next: Estimate = { ...estimate, status: 'sent' }
+          await raw.estimates.put(next)
+          return next
+        })
+      },
+
+      async decide(id: string, input: ApprovalInput) {
+        if (input.decision !== 'approved' && input.decision !== 'rejected') {
+          throw new Error('A decision must be approved or rejected.')
+        }
+        if (input.decision === 'rejected' && !input.note?.trim()) {
+          throw new Error('Record why the customer rejected the estimate.')
+        }
+
+        return raw.transaction(
+          'rw',
+          [raw.estimates, raw.approvals, raw.repairs, raw.repairHistory],
+          async () => {
+            const estimate = await raw.estimates.get(id)
+            if (!estimate) throw new Error(`No estimate ${id}`)
+
+            // §28.13 — only a sent estimate can be decided on.
+            if (!canRecordApproval(estimate.status)) {
+              throw new Error(
+                `Only a sent estimate can be approved or rejected; this one is ${ESTIMATE_STATUS_LABEL[estimate.status]}.`,
+              )
+            }
+
+            const now = nowIso()
+            const approval: CustomerApproval = {
+              id: newId('apv'),
+              estimateId: estimate.id,
+              repairId: estimate.repairId,
+              customerId: estimate.customerId,
+              decision: input.decision,
+              method: input.method,
+              recordedBy: input.recordedBy,
+              note: input.note?.trim() ?? '',
+              at: now,
+            }
+            await raw.approvals.add(approval)
+
+            const nextStatus: EstimateStatus = input.decision === 'approved' ? 'approved' : 'rejected'
+            const next: Estimate = { ...estimate, status: nextStatus }
+            await raw.estimates.put(next)
+
+            // Move the repair on, but only when that move is legal for where it
+            // currently sits. Recording the approval must not fail because the
+            // repair is somewhere the workflow does not allow a jump from.
+            const repair = await raw.repairs.get(estimate.repairId)
+            if (repair && input.decision === 'approved' && repair.status === 'waiting_for_approval') {
+              await raw.repairs.update(repair.id, { status: 'approved' })
+              await raw.repairHistory.add({
+                id: newId('fxh'),
+                repairId: repair.id,
+                from: repair.status,
+                to: 'approved',
+                byUserId: input.recordedBy,
+                note: `Estimate ${estimate.estimateNumber} approved`,
+                at: now,
+                seq: await nextHistorySeq(repair.id),
+              })
+            }
+
+            return { estimate: next, approval }
+          },
+        )
+      },
+
+      async revise(id: string, input: EstimateInput): Promise<Estimate> {
+        // The nested create reads the repair, branch and customer, so all of
+        // them must be in this transaction or Dexie refuses the subtransaction.
+        return raw.transaction(
+          'rw',
+          [raw.estimates, raw.repairs, raw.branches, raw.customers],
+          async () => {
+          const prior = await raw.estimates.get(id)
+          if (!prior) throw new Error(`No estimate ${id}`)
+          // §9 — only a draft, rejected or expired estimate can be revised.
+          assertEstimateRevision(prior.status)
+
+          const revision = await repository.estimates.create({ ...input, repairId: prior.repairId })
+          const closed: Estimate = { ...prior, status: 'revised', supersededBy: revision.id }
+          await raw.estimates.put(closed)
+          return revision
+          },
+        )
+      },
+
+      nextEstimateNumber,
+    },
+
+    approvals: {
+      forEstimate: (estimateId) => raw.approvals.where('estimateId').equals(estimateId).toArray(),
+      forRepair: (repairId) => raw.approvals.where('repairId').equals(repairId).toArray(),
+      async hasApprovalFor(repairId: string) {
+        const rows = await raw.approvals.where('repairId').equals(repairId).toArray()
+        return rows.some((a) => a.decision === 'approved')
+      },
     },
   }
 
