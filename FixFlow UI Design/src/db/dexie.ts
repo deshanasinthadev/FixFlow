@@ -9,6 +9,11 @@ import type {
   Estimate,
   EstimateItem,
   EstimateStatus,
+  Invoice,
+  InvoiceStatus,
+  Payment,
+  PaymentMethodId,
+  PaymentStatus,
   Refund,
   RepairJob,
   RepairStatus,
@@ -18,7 +23,13 @@ import type {
   StockReservation,
   User,
 } from '../domain/types'
-import { checkStockAvailability, computeDocument, sumLines } from '../domain/calculations'
+import {
+  balanceDue,
+  checkStockAvailability,
+  computeDocument,
+  invoiceStatusFor,
+  sumLines,
+} from '../domain/calculations'
 import {
   assertEstimateRevision,
   canRecordApproval,
@@ -34,7 +45,10 @@ import type {
   CustomerInput,
   EstimateInput,
   HoldSaleInput,
+  InvoiceInput,
+  InvoiceWithBalance,
   OpenCashSessionInput,
+  PaymentInput,
   Db,
   DeviceInput,
   DuplicateStrategy,
@@ -99,6 +113,8 @@ export function createDb(name: string = DB_NAME): Db {
     approvals!: Table<CustomerApproval, string>
     cashSessions!: Table<CashSession, string>
     heldSales!: Table<HeldSale, string>
+    invoices!: Table<Invoice, string>
+    payments!: Table<Payment, string>
 
     constructor() {
       super(name)
@@ -132,6 +148,11 @@ export function createDb(name: string = DB_NAME): Db {
       // Version 5 adds held (parked) carts (§10).
       this.version(5).stores({
         heldSales: 'id, branchId, cashierId, createdAt',
+      })
+      // Version 6 adds invoices and the payments recorded against them (§10).
+      this.version(6).stores({
+        invoices: 'id, invoiceNumber, branchId, customerId, repairId, saleId, status, createdAt',
+        payments: 'id, invoiceId, customerId, branchId, status, paidAt',
       })
     }
   }
@@ -229,6 +250,43 @@ export function createDb(name: string = DB_NAME): Db {
       .filter((e) => e.estimateNumber.startsWith(prefix))
       .reduce((max, e) => Math.max(max, Number(e.estimateNumber.slice(prefix.length)) || 0), 0)
     return `${prefix}${String(highest + 1).padStart(4, '0')}`
+  }
+
+  async function nextInvoiceNumber(branchId: string, year = new Date().getFullYear()): Promise<string> {
+    const branch = await raw.branches.get(branchId)
+    const code = (branch?.code ?? 'BR').toUpperCase()
+    const prefix = `INV-${code}-${year}-`
+    const all = await raw.invoices.toArray()
+    const highest = all
+      .filter((i) => i.invoiceNumber.startsWith(prefix))
+      .reduce((max, i) => Math.max(max, Number(i.invoiceNumber.slice(prefix.length)) || 0), 0)
+    return `${prefix}${String(highest + 1).padStart(4, '0')}`
+  }
+
+  /**
+   * §28.8 — `Balance Due = Invoice Total - Successful Payments - Credits`.
+   * Derived here on every read rather than stored, so it can never drift out of
+   * agreement with the payments it comes from.
+   */
+  async function withBalance(invoice: Invoice): Promise<InvoiceWithBalance> {
+    const rows = await raw.payments.where('invoiceId').equals(invoice.id).toArray()
+    const due = balanceDue(invoice.total, rows)
+    return {
+      ...invoice,
+      balanceDue: due,
+      paidTotal: rows
+        .filter((pay) => pay.status === 'paid')
+        .reduce((sum, pay) => sum + pay.amount, 0),
+    }
+  }
+
+  /** Recomputes and stores an invoice's status from its payments. */
+  async function resettle(invoiceId: string): Promise<void> {
+    const invoice = await raw.invoices.get(invoiceId)
+    if (!invoice) return
+    const rows = await raw.payments.where('invoiceId').equals(invoiceId).toArray()
+    const status = invoiceStatusFor(invoice.total, balanceDue(invoice.total, rows))
+    if (status !== invoice.status) await raw.invoices.update(invoiceId, { status })
   }
 
   const repository: Db = {
@@ -928,10 +986,12 @@ export function createDb(name: string = DB_NAME): Db {
           if (!repair) throw new Error(`No repair ${input.repairId}`)
 
           const items: EstimateItem[] = input.items.map((line) => {
-            const qty = Math.round(line.quantity)
-            if (!Number.isInteger(qty) || qty <= 0) {
+            // Validated before any rounding: rounding first would silently turn
+            // 1.5 into 2 and bill for a part the caller never asked for.
+            if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
               throw new Error(`"${line.description}" needs a positive whole-number quantity.`)
             }
+            const qty = line.quantity
             if (!line.description.trim()) throw new Error('Every estimate line needs a description.')
             return {
               id: newId('esi'),
@@ -1079,6 +1139,222 @@ export function createDb(name: string = DB_NAME): Db {
       },
 
       nextEstimateNumber,
+    },
+
+    invoices: {
+      async list(filter: { branchId?: string; customerId?: string; status?: InvoiceStatus } = {}) {
+        let rows = await raw.invoices.toArray()
+        if (filter.branchId) rows = rows.filter((i) => i.branchId === filter.branchId)
+        if (filter.customerId) rows = rows.filter((i) => i.customerId === filter.customerId)
+        if (filter.status) rows = rows.filter((i) => i.status === filter.status)
+        rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        return Promise.all(rows.map(withBalance))
+      },
+
+      async get(id: string): Promise<InvoiceWithBalance | undefined> {
+        const invoice = await raw.invoices.get(id)
+        return invoice ? withBalance(invoice) : undefined
+      },
+
+      async create(input: InvoiceInput): Promise<InvoiceWithBalance> {
+        return raw.transaction('rw', [raw.invoices, raw.payments, raw.repairs, raw.sales, raw.branches], async () => {
+          const repair = await raw.repairs.get(input.repairId)
+          if (!repair) throw new Error(`No repair ${input.repairId}`)
+
+          if (input.saleId) {
+            const sale = await raw.sales.get(input.saleId)
+            if (!sale) throw new Error(`No sale ${input.saleId}`)
+            if (sale.branchId !== repair.branchId) {
+              throw new Error('That sale belongs to a different branch than the repair.')
+            }
+          }
+
+          const items: EstimateItem[] = input.items.map((line) => {
+            // Validated before any rounding: rounding first would silently turn
+            // 1.5 into 2 and bill for a part the caller never asked for.
+            if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+              throw new Error(`"${line.description}" needs a positive whole-number quantity.`)
+            }
+            const qty = line.quantity
+            if (!line.description.trim()) throw new Error('Every invoice line needs a description.')
+            return {
+              id: newId('ini'),
+              productId: line.productId ?? '',
+              description: line.description.trim(),
+              quantity: qty,
+              unitPrice: line.unitPrice,
+              lineTotal: line.unitPrice * qty,
+            }
+          })
+          if (!items.length && !(input.labourCost ?? 0)) {
+            throw new Error('An invoice needs at least one line or a labour charge.')
+          }
+
+          const totals = computeDocument(
+            {
+              labourCost: input.labourCost ?? 0,
+              partsCost: sumLines(items),
+              discount: input.discount ?? 0,
+              taxRate: input.taxRate ?? 0,
+            },
+            input.taxEnabled ?? true,
+          )
+
+          const invoice: Invoice = {
+            id: newId('inv'),
+            invoiceNumber: await nextInvoiceNumber(repair.branchId),
+            branchId: repair.branchId,
+            customerId: repair.customerId,
+            repairId: repair.id,
+            saleId: input.saleId ?? '',
+            items,
+            labourCost: input.labourCost ?? 0,
+            subtotal: totals.gross,
+            discount: totals.discount,
+            taxRate: totals.taxRate,
+            taxAmount: totals.taxAmount,
+            total: totals.total,
+            status: 'draft',
+            createdAt: nowIso(),
+          }
+          await raw.invoices.add(invoice)
+          return withBalance(invoice)
+        })
+      },
+
+      async issue(id: string, actorId: string): Promise<InvoiceWithBalance> {
+        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+          const invoice = await raw.invoices.get(id)
+          if (!invoice) throw new Error(`No invoice ${id}`)
+          if (invoice.status !== 'draft') {
+            throw new Error(`An invoice that is ${invoice.status.replace('_', ' ')} cannot be issued.`)
+          }
+          void actorId
+          const next: Invoice = { ...invoice, status: 'issued' }
+          await raw.invoices.put(next)
+          return withBalance(next)
+        })
+      },
+
+      async cancel(id: string, actorId: string, reason: string): Promise<InvoiceWithBalance> {
+        if (!reason.trim()) throw new Error('Record why the invoice is being voided.')
+        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+          const invoice = await raw.invoices.get(id)
+          if (!invoice) throw new Error(`No invoice ${id}`)
+          if (invoice.status === 'cancelled') throw new Error('That invoice is already voided.')
+
+          const paid = await raw.payments.where('invoiceId').equals(id).toArray()
+          const settled = paid
+            .filter((pay) => pay.status === 'paid')
+            .reduce((sum, pay) => sum + pay.amount, 0)
+          if (settled > 0) {
+            throw new Error(
+              `Cannot void an invoice with Rs. ${(settled / 100).toFixed(2)} of payments recorded against it. ` +
+                'Reverse the payments first, so the history stays intact.',
+            )
+          }
+
+          void actorId
+          // §28.18 — the row and its payments are preserved, never deleted.
+          const next: Invoice = { ...invoice, status: 'cancelled' }
+          await raw.invoices.put(next)
+          return withBalance(next)
+        })
+      },
+
+      nextInvoiceNumber,
+    },
+
+    payments: {
+      async forInvoice(invoiceId: string): Promise<Payment[]> {
+        const rows = await raw.payments.where('invoiceId').equals(invoiceId).toArray()
+        return rows.sort((a, b) => (a.paidAt > b.paidAt ? 1 : -1))
+      },
+
+      async list(filter: { branchId?: string; customerId?: string; status?: PaymentStatus } = {}) {
+        let rows = await raw.payments.toArray()
+        if (filter.branchId) rows = rows.filter((pay) => pay.branchId === filter.branchId)
+        if (filter.customerId) rows = rows.filter((pay) => pay.customerId === filter.customerId)
+        if (filter.status) rows = rows.filter((pay) => pay.status === filter.status)
+        return rows.sort((a, b) => (a.paidAt < b.paidAt ? 1 : -1))
+      },
+
+      async record(input: PaymentInput): Promise<Payment> {
+        const amount = Math.round(input.amount)
+        if (!Number.isInteger(amount) || amount <= 0) {
+          throw new Error('Enter a payment amount greater than zero.')
+        }
+
+        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+          // §28.11 — a payment must reference an invoice.
+          const invoice = await raw.invoices.get(input.invoiceId)
+          if (!invoice) throw new Error(`No invoice ${input.invoiceId}`)
+          if (invoice.status === 'draft') {
+            throw new Error('Issue the invoice before recording a payment against it.')
+          }
+          if (invoice.status === 'cancelled') {
+            throw new Error('That invoice has been voided and cannot take a payment.')
+          }
+
+          const prior = await raw.payments.where('invoiceId').equals(invoice.id).toArray()
+          const due = balanceDue(invoice.total, prior)
+          if (amount > due) {
+            throw new Error(
+              `Cannot record Rs. ${(amount / 100).toFixed(2)} — only ` +
+                `Rs. ${(due / 100).toFixed(2)} is still due on this invoice.`,
+            )
+          }
+
+          const payment: Payment = {
+            id: newId('pay'),
+            invoiceId: invoice.id,
+            customerId: invoice.customerId,
+            branchId: invoice.branchId,
+            amount,
+            method: input.method,
+            status: 'paid',
+            reference: input.reference?.trim() ?? '',
+            receivedBy: input.receivedBy,
+            paidAt: nowIso(),
+            reversesPaymentId: '',
+          }
+          // §28.15 — appended. Prior payments are never edited or merged.
+          await raw.payments.add(payment)
+          await resettle(invoice.id)
+          return payment
+        })
+      },
+
+      async refund(invoiceId: string, paymentId: string, actorId: string): Promise<Payment> {
+        return raw.transaction('rw', [raw.invoices, raw.payments], async () => {
+          const original = await raw.payments.get(paymentId)
+          if (!original) throw new Error(`No payment ${paymentId}`)
+          if (original.invoiceId !== invoiceId) {
+            throw new Error('That payment is not on this invoice.')
+          }
+          if (original.status !== 'paid') {
+            throw new Error(`A payment that is ${original.status} cannot be reversed.`)
+          }
+
+          const all = await raw.payments.where('invoiceId').equals(invoiceId).toArray()
+          const alreadyReversed = all.some((pay) => pay.reversesPaymentId === paymentId)
+          if (alreadyReversed) throw new Error('That payment has already been reversed.')
+
+          const reversal: Payment = {
+            ...original,
+            id: newId('pay'),
+            status: 'refunded',
+            reference: original.reference,
+            receivedBy: actorId,
+            paidAt: nowIso(),
+            // §28.18 — appended, so the original payment stays on the record.
+            reversesPaymentId: original.id,
+          }
+          await raw.payments.add(reversal)
+          await resettle(invoiceId)
+          return reversal
+        })
+      },
     },
 
     // --- held carts (§10) --------------------------------------------------

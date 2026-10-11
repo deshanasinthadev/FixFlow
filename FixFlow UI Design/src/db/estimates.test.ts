@@ -100,6 +100,10 @@ describe('estimates.create', () => {
     await expect(
       quote(repair.id, { items: [{ description: 'Panel', quantity: 0, unitPrice: 100 }] }),
     ).rejects.toThrow(/positive whole-number quantity/i)
+    // The name promised this case; it was never actually sent.
+    await expect(
+      quote(repair.id, { items: [{ description: 'Panel', quantity: 1.5, unitPrice: 100 }] }),
+    ).rejects.toThrow(/positive whole-number quantity/i)
   })
 
   it('refuses a line with no description', async () => {

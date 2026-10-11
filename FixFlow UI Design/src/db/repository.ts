@@ -7,6 +7,10 @@ import type {
   Device,
   Estimate,
   EstimateStatus,
+  Invoice,
+  InvoiceStatus,
+  Payment,
+  PaymentStatus,
   PaymentMethodId,
   RepairJob,
   RepairStatus,
@@ -177,6 +181,35 @@ export interface Db {
     nextEstimateNumber(branchId: string, year?: number): Promise<string>
   }
 
+  /**
+   * §10 — invoices and the payments recorded against them.
+   *
+   * `balanceDue` is derived on every read, never stored, so it cannot drift
+   * out of agreement with the invoice and its payments.
+   */
+  invoices: {
+    list(filter?: { branchId?: string; customerId?: string; status?: InvoiceStatus }): Promise<InvoiceWithBalance[]>
+    get(id: string): Promise<InvoiceWithBalance | undefined>
+    create(input: InvoiceInput): Promise<InvoiceWithBalance>
+    /** Marks the invoice issued. Nothing can be paid against a draft. */
+    issue(id: string, actorId: string): Promise<InvoiceWithBalance>
+    /** §28.18 — voiding preserves the row and its payments; nothing is deleted. */
+    cancel(id: string, actorId: string, reason: string): Promise<InvoiceWithBalance>
+    nextInvoiceNumber(branchId: string, year?: number): Promise<string>
+  }
+
+  payments: {
+    forInvoice(invoiceId: string): Promise<Payment[]>
+    list(filter?: { branchId?: string; customerId?: string; status?: PaymentStatus }): Promise<Payment[]>
+    /**
+     * §28.11 — a payment must reference an invoice. §28.8 — it is appended,
+     * never merged into the invoice, so the payment history stays intact.
+     */
+    record(input: PaymentInput): Promise<Payment>
+    /** §28.18 — reverses a payment by adding a row, not by editing the old one. */
+    refund(invoiceId: string, paymentId: string, actorId: string): Promise<Payment>
+  }
+
   /** §10 — carts set aside mid-sale. Holding reserves no stock. */
   heldSales: {
     list(branchId?: string): Promise<HeldSale[]>
@@ -211,6 +244,16 @@ export interface Db {
   }
 }
 
+/**
+ * An invoice as the screens need it: the stored row plus the balance derived
+ * from its payments. The balance is never written to the database, so it can
+ * never disagree with the payments it comes from.
+ */
+export interface InvoiceWithBalance extends Invoice {
+  balanceDue: number
+  paidTotal: number
+}
+
 export interface EstimateInput {
   repairId: string
   items: { productId?: string; description: string; quantity: number; unitPrice: number }[]
@@ -222,6 +265,29 @@ export interface EstimateInput {
   notes?: string
   expiresAt?: string
   actorId: string
+}
+
+export interface InvoiceInput {
+  /** The repair being billed. The invoice takes its customer and branch from it. */
+  repairId: string
+  /** Optional POS sale this invoice documents, when billing a counter sale. */
+  saleId?: string
+  items: { productId?: string; description: string; quantity: number; unitPrice: number }[]
+  /** Minor units. */
+  labourCost?: number
+  discount?: number
+  taxRate?: number
+  taxEnabled?: boolean
+  actorId: string
+}
+
+export interface PaymentInput {
+  invoiceId: string
+  /** Minor units. */
+  amount: number
+  method: PaymentMethodId
+  reference?: string
+  receivedBy: string
 }
 
 export interface HoldSaleInput {

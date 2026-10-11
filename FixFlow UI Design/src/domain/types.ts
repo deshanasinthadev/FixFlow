@@ -465,6 +465,14 @@ export interface Payment {
   reference: string
   receivedBy: ID
   paidAt: ISODate
+  /**
+   * Set on a reversal row: the payment it reverses. Empty on a normal payment.
+   *
+   * A refund reverses by appending a row with status 'refunded', never by
+   * editing the original — `balanceDue` subtracts refunded rows back out, so
+   * the two together net to zero and the original stays on the record.
+   */
+  reversesPaymentId: ID
 }
 
 export interface Refund {
