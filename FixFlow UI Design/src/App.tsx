@@ -11,6 +11,8 @@ import { ExpensesPage } from "./modules/finance/ExpensesPage";
 import { ReportsPage } from "./modules/finance/ReportsPage";
 import { WarrantyPage } from "./modules/warranty/WarrantyPage";
 import { AuditLogPage } from "./modules/audit/AuditLogPage";
+import { can, requirePermission } from "./domain/permissions";
+import { permissionForPage } from "./domain/pageAccess";
 import { deriveNotifications } from "./modules/notifications/derive";
 import { toCsv } from "./csv/pipeline";
 import { downloadText, stamp } from "./lib/download";
@@ -72,7 +74,7 @@ const roleNav: Record<Role, ReadonlyArray<{ label: string; items: ReadonlyArray<
     { label: "Account", items: [["Notifications", "bell"], ["Profile", "team"]] },
   ],
   Cashier: [
-    { label: "Point of sale", items: [["Dashboard", "grid"], ["POS", "cart"], ["Customers", "users"], ["Products", "box"], ["Sales", "sale"], ["Invoices", "file"], ["Payments", "card"], ["Cash Register", "cash"], ["Refunds", "transfer"]] },
+    { label: "Point of sale", items: [["Dashboard", "grid"], ["POS", "cart"], ["Customers", "users"], ["Products", "box"], ["Sales", "sale"], ["Invoices", "file"], ["Payments", "card"], ["Cash Register", "cash"]] },
     { label: "Service", items: [["Paid Deliveries", "check"], ["Warranty", "shield"], ["Notifications", "bell"], ["Profile", "team"]] },
   ],
   Customer: [
@@ -121,7 +123,38 @@ function App() {
   const [analyzed, setAnalyzed] = useState(false);
 
   const currentNav = user ? roleNav[user.role] : [];
+  /**
+   * §5, §10 — the page gate.
+   *
+   * Hiding the nav item is not access control; it only removes the link. A page
+   * can still be reached by a dashboard card, the search palette, or a stale
+   * bookmark. This is what actually decides, and it is evaluated on every
+   * render rather than once at navigation, so a role change takes effect
+   * immediately rather than after a reload.
+   */
   const navPages = useMemo(() => currentNav.flatMap((group) => group.items.map(([label]) => label)), [currentNav]);
+  const pagePermission = permissionForPage(page);
+  /**
+   * §5, §10, §20 — the page gate.
+   *
+   * Hiding the nav item is not access control; it only removes the link. A page
+   * can still be reached by a dashboard card, the search palette, or a stale
+   * bookmark. This is what actually decides, and it is evaluated on every
+   * render rather than once at navigation, so a role change takes effect
+   * immediately rather than after a reload.
+   *
+   * Staff are gated by permission. A customer is a different case entirely:
+   * they hold no staff permission at all, so asking the permission map about
+   * them would refuse every page in their own portal. Their authorization is
+   * the scope instead — the screens they can reach filter themselves to
+   * `customerScope`, and a record they do not own is never loaded. Being in
+   * their nav is therefore the test, and the scoping is the control.
+   */
+  const pageAllowed = !user
+    ? false
+    : user.role === "Customer"
+      ? navPages.includes(page) || page === "My Repair Details" || page === "Profile"
+      : (!pagePermission || can(toDomainRole(user.role), pagePermission));
   const extraPages = user?.role === "Admin" || user?.role === "Manager" ? ["Repair Details", "New Repair", "Profile"] : user?.role === "Technician" ? ["Repair Details", "Profile"] : user?.role === "Customer" ? ["My Repair Details", "Profile"] : ["Profile"];
   const allowedPages = [...navPages, ...extraPages];
   // §6 — every figure on these screens derives from saved records.
@@ -358,31 +391,41 @@ function App() {
           <div className="page-head">
             <div><div className="eyebrow">{page === "Dashboard" ? `${user.role} workspace · ${todayLabel}` : `Home  /  ${page}`}</div><h1>{title}</h1>{page === "Dashboard" && <p>{isCustomer ? "Track your repairs, approvals, payments and warranty in one place." : `Here's what's happening in your ${user.role === "Admin" ? "repair business" : "workspace"} today.`}</p>}</div>
             <div className="head-actions">
-              {page === "Dashboard" && !isCustomer && <span className="date-filter" aria-label="Today"><Icon name="clock"/><span>{shortDateLabel}</span></span>}
-              {page === "Repairs" && canCreateRepair && <><Button kind="secondary" icon="download" onClick={exportRepairs}>Export</Button><Button icon="plus" onClick={() => navigate("New Repair")}>New Repair</Button></>}
+              {pageAllowed && page === "Dashboard" && !isCustomer && <span className="date-filter" aria-label="Today"><Icon name="clock"/><span>{shortDateLabel}</span></span>}
+              {pageAllowed && page === "Repairs" && canCreateRepair && <><Button kind="secondary" icon="download" onClick={exportRepairs}>Export</Button><Button icon="plus" onClick={() => navigate("New Repair")}>New Repair</Button></>}
             </div>
           </div>
 
-          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures} money={money} weekSeries={weekSeries} monthSeries={monthSeries} overdueRepairs={overdueRepairs} lowStock={lowStockItems} statusCounts={statusCounts} recentSales={recentSales}/> : <RoleDashboard user={user} data={scopedRepairs} jobs={scopedJobs} navigate={navigate} figures={figures} sales={scopedSales} lowStock={lowStockItems}/>)}
-          {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
-          {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
-          {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
-          {page === "Repair Details" && <RepairDetails jobNumber={param} technician={user.role === "Technician"} actor={user} navigate={navigate}/>}
-          {page === "My Repair Details" && <CustomerRepairDetails jobNumber={param} jobs={scopedJobs}/>}
-          {page === "Estimates" && <EstimatesPage branchId={user.branchId} actorId={user.id} canDecide={user.role === "Admin" || user.role === "Manager"} canSend={user.role !== "Customer"} customerScope={user.role === "Customer" ? user.customerId : undefined}/>}
-          {(page === "Invoices" || page === "Receivables" || page === "Payments") && <BillingPage branchId={user.branchId} actorId={user.id} canEdit={user.role !== "Customer"} customerScope={user.role === "Customer" ? user.customerId : undefined} mode={page === "Receivables" ? "receivables" : page === "Payments" ? "payments" : "invoices"}/>}
-          {page === "Stock Adjustments" && <StockAdjustmentsPage branchId={user.branchId} actorId={user.id}/>}
-          {page === "Customers" && <CustomersPage branchId={user.branchId} actorId={user.id}/>}
-          {page === "Expenses" && <ExpensesPage branchId={user.branchId} actorId={user.id}/>}
-          {(page === "Reports" || page === "Finance") && <ReportsPage branchId={user.branchId}/>}
-          {(page === "Warranty" || page === "Warranty Claims") && <WarrantyPage branchId={user.branchId} actorId={user.id}/>}
-          {page === "Audit Log" && <AuditLogPage branchId={user.branchId} canSeeAll={user.role === "Admin"}/>}
-          {page === "Cash Register" && <CashRegisterPage branchId={user.branchId} cashierId={user.id}/>}
-          {(page === "Sales" || page === "Refunds") && <SalesPage branchId={user.branchId} actorId={user.id}/>}
-          {page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
-          {(page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
-          {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis/>}
-          {!["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds", "Estimates", "Invoices", "Receivables", "Payments", "Stock Adjustments", "Customers", "Expenses", "Reports", "Finance", "Warranty", "Warranty Claims", "Audit Log"].includes(page) && <ModulePreview page={page} user={user} source={{ repairs: scopedJobs, products: scopedProducts }}/>}
+          {!pageAllowed && <Card>
+            <h2>No access to this page</h2>
+            <p className="danger-text" role="alert">{requirePermission(toDomainRole(user.role), pagePermission!).reason}</p>
+            <p className="muted">
+              The navigation hides pages a role cannot use, but that alone is not a control — a bookmark, a dashboard
+              tile or the search palette can still reach here. Ask an administrator if this page should be available
+              to you.
+            </p>
+            <Button kind="secondary" onClick={() => navigate("Dashboard")}>Back to the dashboard</Button>
+          </Card>}
+          {pageAllowed && page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures} money={money} weekSeries={weekSeries} monthSeries={monthSeries} overdueRepairs={overdueRepairs} lowStock={lowStockItems} statusCounts={statusCounts} recentSales={recentSales}/> : <RoleDashboard user={user} data={scopedRepairs} jobs={scopedJobs} navigate={navigate} figures={figures} sales={scopedSales} lowStock={lowStockItems}/>)}
+          {pageAllowed && (page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
+          {pageAllowed && page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
+          {pageAllowed && page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
+          {pageAllowed && page === "Repair Details" && <RepairDetails jobNumber={param} technician={user.role === "Technician"} actor={user} navigate={navigate}/>}
+          {pageAllowed && page === "My Repair Details" && <CustomerRepairDetails jobNumber={param} jobs={scopedJobs}/>}
+          {pageAllowed && page === "Estimates" && <EstimatesPage branchId={user.branchId} actorId={user.id} canDecide={user.role === "Admin" || user.role === "Manager"} canSend={user.role !== "Customer"} customerScope={user.role === "Customer" ? user.customerId : undefined}/>}
+          {pageAllowed && (page === "Invoices" || page === "Receivables" || page === "Payments") && <BillingPage branchId={user.branchId} actorId={user.id} canEdit={user.role !== "Customer"} customerScope={user.role === "Customer" ? user.customerId : undefined} mode={page === "Receivables" ? "receivables" : page === "Payments" ? "payments" : "invoices"}/>}
+          {pageAllowed && page === "Stock Adjustments" && <StockAdjustmentsPage branchId={user.branchId} actorId={user.id}/>}
+          {pageAllowed && page === "Customers" && <CustomersPage branchId={user.branchId} actorId={user.id}/>}
+          {pageAllowed && page === "Expenses" && <ExpensesPage branchId={user.branchId} actorId={user.id}/>}
+          {pageAllowed && (page === "Reports" || page === "Finance") && <ReportsPage branchId={user.branchId}/>}
+          {pageAllowed && (page === "Warranty" || page === "Warranty Claims") && <WarrantyPage branchId={user.branchId} actorId={user.id}/>}
+          {pageAllowed && page === "Audit Log" && <AuditLogPage branchId={user.branchId} canSeeAll={user.role === "Admin"}/>}
+          {pageAllowed && page === "Cash Register" && <CashRegisterPage branchId={user.branchId} cashierId={user.id}/>}
+          {pageAllowed && (page === "Sales" || page === "Refunds") && <SalesPage branchId={user.branchId} actorId={user.id}/>}
+          {pageAllowed && page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
+          {pageAllowed && (page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
+          {pageAllowed && (page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis/>}
+          {pageAllowed && !["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds", "Estimates", "Invoices", "Receivables", "Payments", "Stock Adjustments", "Customers", "Expenses", "Reports", "Finance", "Warranty", "Warranty Claims", "Audit Log"].includes(page) && <ModulePreview page={page} user={user} source={{ repairs: scopedJobs, products: scopedProducts }}/>}
         </main>
       </div>
 
