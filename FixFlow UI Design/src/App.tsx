@@ -17,7 +17,7 @@ import { formatLKR, formatLKRCompact } from "./lib/format";
 import { nextRepairStatuses, mayPerformRepairTransition } from "./domain/workflows";
 import { computeDashboardFigures, computeMoneyFigures, computeSeries, countOverdueRepairs, availableUnits, type DashboardFigures, type MoneyFigures, type SeriesPoint } from "./modules/dashboard/figures";
 import { inspectionPlan, suggestDiagnosis, type DiagnosisResult } from "./modules/diagnosis/engine";
-import type { RepairJob, RepairStatus, Sale } from "./domain/types";
+import type { RepairJob, RepairStatus, Sale , RepairPartUsage } from "./domain/types";
 import type { Product } from "./db/schema";
 import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole, boardColumns, customerProgress } from "./modules/repairs/repairView";
 
@@ -892,6 +892,91 @@ function NewRepair({ navigate, actor }: { navigate: (p: string) => void; actor: 
     </Card></div>;
 }
 
+/**
+ * Parts fitted to a repair (§2, §11).
+ *
+ * Recording a part here is what takes it off the shelf: the write goes through
+ * `db.repairs.addPart`, which decrements stock and writes the movement naming
+ * this job in one transaction. Nothing on this panel computes a stock figure
+ * itself.
+ *
+ * Only parts are offered — services are excluded because fitting one makes no
+ * sense, and the catalogue is filtered to this repair's branch so stock cannot
+ * be drawn from a shelf that is not here.
+ */
+function RepairPartsPanel({ repair, parts, products, productId, setProductId, quantity, setQuantity, busy, error, onAdd, onRemove }: {
+  repair: RepairJob;
+  parts: RepairPartUsage[];
+  products: Product[];
+  productId: string;
+  setProductId: (value: string) => void;
+  quantity: string;
+  setQuantity: (value: string) => void;
+  busy: boolean;
+  error: string;
+  onAdd: () => void;
+  onRemove: (partUsageId: string) => void;
+}) {
+  const fitted = parts.filter((part) => part.quantity > 0);
+  const partsCost = fitted.reduce((sum, part) => sum + part.unitCost * part.quantity, 0);
+  const selected = products.find((product) => product.id === productId);
+
+  return <Card>
+    <div className="card-head">
+      <div><h2>Parts used</h2><p>{fitted.length} fitted · {formatLKR(partsCost)} at cost</p></div>
+    </div>
+
+    {error && <p className="danger-text" role="alert">{error}</p>}
+
+    {fitted.length === 0
+      ? <p className="muted">No parts recorded against this repair yet.</p>
+      : <div className="table-wrap"><table>
+          <thead><tr><th>Part</th><th>Qty</th><th>Unit cost</th><th>Line</th><th/></tr></thead>
+          <tbody>
+            {fitted.map((part) => <tr key={part.id}>
+              <td><strong>{part.productName}</strong></td>
+              <td>{part.quantity}</td>
+              <td>{formatLKR(part.unitCost)}</td>
+              <td><strong>{formatLKR(part.unitCost * part.quantity)}</strong></td>
+              <td><button className="btn secondary" disabled={busy} onClick={() => onRemove(part.id)}>Return to stock</button></td>
+            </tr>)}
+          </tbody>
+        </table></div>}
+
+    {parts.some((part) => part.quantity === 0) && (
+      <p className="muted">A part returned to stock stays listed at zero, so the repair still shows it was fitted and taken back off.</p>
+    )}
+
+    <h3>Record a part</h3>
+    <div className="form-actions">
+      <label>Part
+        <select className="filter-select" value={productId} onChange={(event) => setProductId(event.target.value)}>
+          <option value="">Select a part…</option>
+          {products.map((product) => (
+            <option key={product.id} value={product.id}>
+              {product.sku} — {product.name} ({product.stockOnHand - product.reserved} available)
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>Quantity
+        <input type="number" min="1" step="1" value={quantity} onChange={(event) => setQuantity(event.target.value)}/>
+      </label>
+      <button className="btn" disabled={busy || !productId} onClick={onAdd}>Record part</button>
+    </div>
+    {selected && (
+      <p className="muted">
+        {selected.name}: {selected.stockOnHand} on hand, {selected.reserved} reserved,
+        {" "}{selected.stockOnHand - selected.reserved} available to fit.
+      </p>
+    )}
+    <p className="muted">
+      Recording a part takes it off the shelf immediately and writes a stock movement naming {repair.jobNumber}.
+      Units held for another repair are not available here.
+    </p>
+  </Card>;
+}
+
 function RepairDetails({ jobNumber, technician = false, actor, navigate }: {
   jobNumber: string;
   technician?: boolean;
@@ -900,9 +985,15 @@ function RepairDetails({ jobNumber, technician = false, actor, navigate }: {
 }) {
   const { db, bump } = useDb();
   const { data, loading } = useQuery(
-    async (d) => ({ jobs: await d.repairs.list(), users: await d.users.list() }),
+    async (d) => ({
+      jobs: await d.repairs.list(),
+      users: await d.users.list(),
+      products: await d.products.list(),
+    }),
     [],
   );
+  const [partProductId, setPartProductId] = useState("");
+  const [partQty, setPartQty] = useState("1");
   const [tab, setTab] = useState("Overview");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -914,6 +1005,11 @@ function RepairDetails({ jobNumber, technician = false, actor, navigate }: {
   const techs = useMemo(() => technicianNames(data?.users ?? []), [data]);
   const { data: history } = useQuery(
     async (d) => (repair ? await d.repairs.history(repair.id) : []),
+    [repair?.id ?? ""],
+  );
+  // Parts consumed on this repair, and what could still be fitted.
+  const { data: partRows } = useQuery(
+    async (d) => (repair ? await d.repairs.parts(repair.id) : []),
     [repair?.id ?? ""],
   );
 
@@ -949,12 +1045,37 @@ function RepairDetails({ jobNumber, technician = false, actor, navigate }: {
 
   return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.jobNumber}</span><Badge>{STATUS_LABEL[repair.status]}</Badge></div><h2>{repair.deviceSummary}</h2><p>{repair.customerName} · {PRIORITY_LABEL[repair.priority]} priority</p></div></div><div className="repair-facts"><div><span>Technician</span><strong>{techs[repair.technicianId] ?? "Unassigned"}</strong></div><div><span>Estimated completion</span><strong>{formatEta(repair)}</strong></div>{!technician && <div><span>Labour so far</span><strong>{formatLKR(repair.labourCost)}</strong></div>}</div></Card>
     <div className="tabs">{tabs.map((x) => <button className={tab === x ? "active" : ""} onClick={() => setTab(x)} key={x}>{x}</button>)}</div>
-    <div className="detail-grid"><Card><div className="card-head"><div><h2>{tab === "Overview" ? "Repair workflow" : tab}</h2><p>Connected repair record and activity</p></div></div>
+    <div className="detail-grid">{tab === "Parts" ? <RepairPartsPanel
+        repair={repair}
+        parts={partRows ?? []}
+        products={(data?.products ?? []).filter((product) => product.branchId === repair.branchId && !product.isService)}
+        productId={partProductId}
+        setProductId={setPartProductId}
+        quantity={partQty}
+        setQuantity={setPartQty}
+        busy={busy}
+        error={error}
+        onAdd={async () => {
+          setBusy(true); setError("");
+          try {
+            await db.repairs.addPart({ repairId: repair.id, productId: partProductId, quantity: Number(partQty), actorId: actor.id });
+            setPartProductId(""); setPartQty("1"); bump();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Could not record that part.");
+          } finally { setBusy(false); }
+        }}
+        onRemove={async (partUsageId) => {
+          setBusy(true); setError("");
+          try { await db.repairs.removePart(partUsageId, actor.id); bump(); }
+          catch (err) { setError(err instanceof Error ? err.message : "Could not return that part."); }
+          finally { setBusy(false); }
+        }}
+      /> : <Card><div className="card-head"><div><h2>{tab === "Overview" ? "Repair workflow" : tab}</h2><p>Connected repair record and activity</p></div></div>
       <div className="timeline">{trail.length === 0 && <p className="muted">No status history yet.</p>}
         {trail.map((entry, i) => <div className={i < currentIndex ? "complete" : "current"} key={`${entry.seq}-${entry.at}`}><span>{i < currentIndex ? <Icon name="check" size={13}/> : i + 1}</span><small>{STATUS_LABEL[entry.to] ?? entry.to}</small></div>)}</div>
       {moves.length > 0 && <><h3>Move this repair on</h3><div className="payment-methods">{moves.map((m) => <button key={m.to} className={m.allowed ? "active" : ""} disabled={!m.allowed || busy} title={m.allowed ? "" : m.reason} onClick={() => moveTo(m.to)}>{STATUS_LABEL[m.to] ?? m.to}</button>)}</div></>}
       {error && <p className="danger-text" role="alert">{error}</p>}
-    </Card><Card className="customer-panel"><h2>Customer & device</h2><div className="customer-line"><div className="avatar">{repair.customerName.split(" ").map((x) => x[0]).join("").slice(0, 2)}</div><div><strong>{repair.customerName}</strong><span>{repair.phone}</span></div></div><hr/><div className="info-list"><div><span>Serial number</span><strong>{repair.serialNumber || "—"}</strong></div><div><span>Complaint</span><strong>{repair.reportedIssue}</strong></div><div><span>Accessories</span><strong>{repair.accessoriesReceived.length ? repair.accessoriesReceived.join(", ") : "None"}</strong></div></div></Card></div>
+    </Card>}<Card className="customer-panel"><h2>Customer & device</h2><div className="customer-line"><div className="avatar">{repair.customerName.split(" ").map((x) => x[0]).join("").slice(0, 2)}</div><div><strong>{repair.customerName}</strong><span>{repair.phone}</span></div></div><hr/><div className="info-list"><div><span>Serial number</span><strong>{repair.serialNumber || "—"}</strong></div><div><span>Complaint</span><strong>{repair.reportedIssue}</strong></div><div><span>Accessories</span><strong>{repair.accessoriesReceived.length ? repair.accessoriesReceived.join(", ") : "None"}</strong></div></div></Card></div>
   </>;
 }
 const CATEGORY_ICON: Record<string, IconName> = {
