@@ -170,6 +170,18 @@ export function createDb(name: string = DB_NAME): Db {
     const product = await raw.products.get(a.productId)
     if (!product) throw new Error(`adjustStock: no product ${a.productId}`)
 
+    if (a.qty === 0) throw new Error('A stock movement needs a quantity other than zero.')
+
+    /**
+     * §28.17 — a manual adjustment is the one movement type with no other
+     * transaction behind it. Sales, purchases and repairs each carry their own
+     * reference, so the reason *is* the only record of why the number moved.
+     * Without it the ledger says "stock changed" and nothing more.
+     */
+    if (a.type === 'adjustment' && !a.reason?.trim()) {
+      throw new Error('A stock adjustment needs a reason — damaged, counted, returned, written off.')
+    }
+
     const before = product.stockOnHand
     const after = before + a.qty
     if (after < 0) {

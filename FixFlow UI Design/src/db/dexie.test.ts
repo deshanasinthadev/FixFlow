@@ -197,6 +197,28 @@ describe('stock ledger', () => {
     ).rejects.toThrow(/only \d+ on hand/)
   })
 
+  it('refuses an adjustment with no reason', async () => {
+    const p = seedProducts.find((x) => x.stockOnHand > 0)!
+    await expect(
+      db.products.adjustStock({ productId: p.id, branchId: p.branchId, type: 'adjustment', qty: -1 }),
+    ).rejects.toThrow(/needs a reason/)
+    // A blank reason is no reason.
+    await expect(
+      db.products.adjustStock({ productId: p.id, branchId: p.branchId, type: 'adjustment', qty: -1, reason: '   ' }),
+    ).rejects.toThrow(/needs a reason/)
+
+    // Nothing was written by either attempt.
+    const after = await db.products.get(p.id)
+    expect(after!.stockOnHand).toBe(p.stockOnHand)
+  })
+
+  it('refuses a movement of zero', async () => {
+    const p = seedProducts.find((x) => x.stockOnHand > 0)!
+    await expect(
+      db.products.adjustStock({ productId: p.id, branchId: p.branchId, type: 'adjustment', qty: 0, reason: 'No-op' }),
+    ).rejects.toThrow(/other than zero/)
+  })
+
   it('records before/after on every movement', async () => {
     const p = seedProducts.find((x) => x.stockOnHand > 2)!
     const start = p.stockOnHand
