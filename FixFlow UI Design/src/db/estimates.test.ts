@@ -298,3 +298,70 @@ describe('estimates.list', () => {
     expect(await db.estimates.list({ customerId: repair.customerId })).toHaveLength(2)
   })
 })
+
+describe('the approval gate on repair status (§28.13)', () => {
+  it('refuses to start work with no approval recorded', async () => {
+    const repair = await repairAwaitingApproval()
+    await expect(
+      db.repairs.changeStatus(repair.id, 'approved', 'usr_manager'),
+    ).resolves.toBeDefined() // approved is not itself gated
+    await expect(
+      db.repairs.changeStatus(repair.id, 'repairing', 'usr_tech_1'),
+    ).rejects.toThrow(/has not approved the estimate/i)
+  })
+
+  it('allows work once an estimate has been approved', async () => {
+    const repair = await repairAwaitingApproval()
+    const sent = await db.estimates.send((await quote(repair.id)).id, 'usr_manager')
+    await db.estimates.decide(sent.id, { decision: 'approved', method: 'portal', recordedBy: 'usr_manager' })
+
+    const moved = await db.repairs.changeStatus(repair.id, 'repairing', 'usr_tech_1')
+    expect(moved.status).toBe('repairing')
+  })
+
+  it('still refuses after the estimate was rejected', async () => {
+    const repair = await repairAwaitingApproval()
+    const sent = await db.estimates.send((await quote(repair.id)).id, 'usr_manager')
+    await db.estimates.decide(sent.id, {
+      decision: 'rejected', method: 'phone', recordedBy: 'usr_manager', note: 'Too expensive',
+    })
+    await db.repairs.changeStatus(repair.id, 'approved', 'usr_manager')
+    await expect(
+      db.repairs.changeStatus(repair.id, 'repairing', 'usr_tech_1'),
+    ).rejects.toThrow(/has not approved the estimate/i)
+  })
+
+  it('does not gate the pre-approval steps', async () => {
+    // Diagnosis and quoting must be possible before anyone has agreed to pay.
+    const customer = await db.customers.create({
+      fullName: 'Gate Test', phone: '+94770002222', email: '', address: '', notes: '', status: 'active',
+    })
+    const device = await db.devices.create({
+      customerId: customer.id, category: 'mobile', brand: 'Oppo', model: 'A57',
+      serialNumber: 'OP-A57', purchaseDate: '', notes: '',
+    })
+    const job = await db.repairs.create({
+      branchId: 'br_kandy', customerId: customer.id, deviceId: device.id,
+      customerName: customer.fullName, phone: customer.phone, email: '',
+      deviceSummary: 'Oppo A57', serialNumber: 'OP-A57', reportedIssue: 'Battery drains fast',
+      deviceCondition: 'Good — minor wear', accessoriesReceived: [], intakePhotoUrls: [],
+      completionPhotoUrls: [], priority: 'normal', status: 'received', technicianId: '',
+      receivedAt: new Date().toISOString(), expectedCompletion: '', internalNotes: '',
+      customerVisibleNotes: [], labourCost: 0,
+    })
+    expect((await db.repairs.changeStatus(job.id, 'diagnosing', 'usr_tech_1')).status).toBe('diagnosing')
+    expect((await db.repairs.changeStatus(job.id, 'waiting_for_approval', 'usr_tech_1')).status)
+      .toBe('waiting_for_approval')
+  })
+
+  it('writes nothing when the gate refuses', async () => {
+    const repair = await repairAwaitingApproval()
+    await db.repairs.changeStatus(repair.id, 'approved', 'usr_manager')
+    const historyBefore = await db.repairs.history(repair.id)
+    await expect(
+      db.repairs.changeStatus(repair.id, 'repairing', 'usr_tech_1'),
+    ).rejects.toThrow()
+    expect(await db.repairs.history(repair.id)).toHaveLength(historyBefore.length)
+    expect((await db.repairs.get(repair.id))?.status).toBe('approved')
+  })
+})

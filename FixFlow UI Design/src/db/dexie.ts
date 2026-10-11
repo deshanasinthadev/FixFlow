@@ -20,8 +20,10 @@ import { checkStockAvailability, computeDocument, sumLines } from '../domain/cal
 import {
   assertEstimateRevision,
   canRecordApproval,
+  canStartWork,
   canTransitionEstimate,
   ESTIMATE_STATUS_LABEL,
+  STATUSES_REQUIRING_APPROVAL,
 } from '../domain/workflows'
 import type {
   ApprovalInput,
@@ -603,11 +605,24 @@ export function createDb(name: string = DB_NAME): Db {
       },
 
       async changeStatus(id: string, to: RepairStatus, actorId: string, note?: string): Promise<RepairJob> {
-        return raw.transaction('rw', raw.repairs, raw.repairHistory, async () => {
+        return raw.transaction('rw', [raw.repairs, raw.repairHistory, raw.approvals], async () => {
           const job = await raw.repairs.get(id)
           if (!job) throw new Error(`No repair ${id}`)
           // Validated before writing — §28.10.
           assertRepairTransition(job.status, to)
+
+          // §28.13 / §9 — repairing, testing and completed require a recorded
+          // customer approval. Without this gate the statuses exist but mean
+          // nothing, and work could start on a quote nobody agreed to.
+          if (STATUSES_REQUIRING_APPROVAL.includes(to)) {
+            const approvals = await raw.approvals.where('repairId').equals(id).toArray()
+            const gate = canStartWork(
+              to,
+              approvals.some((a) => a.decision === 'approved'),
+              false,
+            )
+            if (!gate.allowed) throw new Error(gate.reason)
+          }
 
           const now = nowIso()
           const updated: RepairJob = { ...job, status: to, updatedAt: now }
