@@ -3,20 +3,28 @@ import type {
   Branch,
   Customer,
   Device,
+  Refund,
   RepairJob,
   RepairStatus,
   RepairStatusHistoryEntry,
+  Sale,
+  SaleItem,
+  StockReservation,
   User,
 } from '../domain/types'
+import { checkStockAvailability, computeDocument, sumLines } from '../domain/calculations'
 import type {
+  CheckoutInput,
   CustomerInput,
   Db,
   DeviceInput,
   DuplicateStrategy,
   ImportResult,
   ProductInput,
+  RefundInput,
   RepairFilter,
   RepairInput,
+  SaleFilter,
   StockAdjust,
 } from './repository'
 import {
@@ -65,6 +73,9 @@ export function createDb(name: string = DB_NAME): Db {
     devices!: Table<Device, string>
     repairs!: Table<RepairJob, string>
     repairHistory!: Table<RepairStatusHistoryEntry, string>
+    sales!: Table<Sale, string>
+    refunds!: Table<Refund, string>
+    reservations!: Table<StockReservation, string>
 
     constructor() {
       super(name)
@@ -81,7 +92,10 @@ export function createDb(name: string = DB_NAME): Db {
         customers: 'id, code, fullName, phone, portalToken, status',
         devices: 'id, customerId, category',
         repairs: 'id, jobNumber, branchId, customerId, technicianId, status, priority, receivedAt',
-        repairHistory: 'id, repairId, at',
+        repairHistory: 'id, repairId, seq',
+        sales: 'id, receiptNumber, branchId, cashierId, customerId, idempotencyKey, createdAt',
+        refunds: 'id, originalSaleId, createdAt',
+        reservations: 'id, productId, repairId',
       })
     }
   }
@@ -155,6 +169,18 @@ export function createDb(name: string = DB_NAME): Db {
   async function nextHistorySeq(repairId: string): Promise<number> {
     const existing = await raw.repairHistory.where('repairId').equals(repairId).toArray()
     return existing.reduce((max, e) => Math.max(max, e.seq), -1) + 1
+  }
+
+  /** Next receipt number for a branch, e.g. POS-CMB-2026-0001. */
+  async function nextReceiptNumber(branchId: string, year = new Date().getFullYear()): Promise<string> {
+    const branch = await raw.branches.get(branchId)
+    const code = (branch?.code ?? 'BR').toUpperCase()
+    const prefix = `POS-${code}-${year}-`
+    const all = await raw.sales.toArray()
+    const highest = all
+      .filter((sale) => sale.receiptNumber.startsWith(prefix))
+      .reduce((max, sale) => Math.max(max, Number(sale.receiptNumber.slice(prefix.length)) || 0), 0)
+    return `${prefix}${String(highest + 1).padStart(4, '0')}`
   }
 
   const repository: Db = {
@@ -253,6 +279,52 @@ export function createDb(name: string = DB_NAME): Db {
           await raw.movements.where('productId').equals(id).delete()
         })
       },
+
+      async reserve(productId: string, quantity: number, repairId: string): Promise<StockReservation> {
+        const qty = Math.round(quantity)
+        if (!Number.isInteger(qty) || qty <= 0) {
+          throw new Error('Reserve a positive whole number of units.')
+        }
+        return raw.transaction('rw', [raw.products, raw.reservations], async () => {
+          const product = await raw.products.get(productId)
+          if (!product) throw new Error(`No product ${productId}`)
+          const available = product.stockOnHand - product.reserved
+          if (qty > available) {
+            throw new Error(`Cannot reserve ${qty} of "${product.name}" — only ${available} available.`)
+          }
+          const reservation: StockReservation = {
+            id: newId('rsv'),
+            productId,
+            repairId,
+            quantity: qty,
+            createdAt: nowIso(),
+          }
+          await raw.reservations.add(reservation)
+          await raw.products.update(productId, { reserved: product.reserved + qty, updatedAt: nowIso() })
+          return reservation
+        })
+      },
+
+      async releaseReservation(repairId: string): Promise<void> {
+        await raw.transaction('rw', [raw.products, raw.reservations], async () => {
+          const held = await raw.reservations.where('repairId').equals(repairId).toArray()
+          for (const r of held) {
+            const product = await raw.products.get(r.productId)
+            if (product) {
+              await raw.products.update(r.productId, {
+                reserved: Math.max(0, product.reserved - r.quantity),
+                updatedAt: nowIso(),
+              })
+            }
+            await raw.reservations.delete(r.id)
+          }
+        })
+      },
+
+      reservations: (productId?: string) =>
+        productId
+          ? raw.reservations.where('productId').equals(productId).toArray()
+          : raw.reservations.toArray(),
 
       adjustStock: writeMovement,
     },
@@ -568,6 +640,211 @@ export function createDb(name: string = DB_NAME): Db {
         void branch
         return `${prefix}${String(highest + 1).padStart(6, '0')}`
       },
+    },
+
+    // --- point of sale (§10) ------------------------------------------------
+
+    sales: {
+      async list(filter: SaleFilter = {}): Promise<Sale[]> {
+        let rows = await raw.sales.toArray()
+        if (filter.branchId) rows = rows.filter((sale) => sale.branchId === filter.branchId)
+        if (filter.cashierId) rows = rows.filter((sale) => sale.cashierId === filter.cashierId)
+        if (filter.customerId) rows = rows.filter((sale) => sale.customerId === filter.customerId)
+        rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        return filter.limit ? rows.slice(0, filter.limit) : rows
+      },
+
+      get: (id) => raw.sales.get(id),
+
+      async checkout(input: CheckoutInput): Promise<Sale> {
+        if (!input.lines.length) throw new Error('Add at least one product to the cart.')
+        for (const line of input.lines) {
+          if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+            throw new Error('Every line needs a positive whole-number quantity.')
+          }
+        }
+
+        // §28.16 — a retried checkout must not create a second sale. Checked
+        // outside the transaction for the fast path and again inside it, so
+        // two concurrent retries cannot both get through.
+        if (input.idempotencyKey) {
+          const prior = await raw.sales.where('idempotencyKey').equals(input.idempotencyKey).first()
+          if (prior) return prior
+        }
+
+        return raw.transaction('rw', [raw.products, raw.movements, raw.sales, raw.branches, raw.customers], async () => {
+          if (input.idempotencyKey) {
+            const prior = await raw.sales.where('idempotencyKey').equals(input.idempotencyKey).first()
+            if (prior) return prior
+          }
+
+          const branch = await raw.branches.get(input.branchId)
+          if (!branch) throw new Error(`Unknown branch ${input.branchId}`)
+          const customer = input.customerId ? await raw.customers.get(input.customerId) : undefined
+          if (input.customerId && !customer) throw new Error(`Unknown customer ${input.customerId}`)
+
+          const ids = input.lines.map((line) => line.productId)
+          const products = await raw.products.where('id').anyOf(ids).toArray()
+          const byId = new Map(products.map((pr) => [pr.id, pr]))
+          for (const id of ids) {
+            if (!byId.has(id)) throw new Error(`Unknown product ${id}`)
+          }
+
+          // §28.1 / §28.3 — sell from what is AVAILABLE, not merely what is on
+          // the shelf, or stock reserved for a repair could be sold twice.
+          const availability: Record<string, number> = {}
+          for (const [id, pr] of byId) availability[id] = pr.stockOnHand - pr.reserved
+          const failures = checkStockAvailability(
+            input.lines.map((line) => ({
+              productId: line.productId,
+              productName: byId.get(line.productId)!.name,
+              quantity: line.quantity,
+            })),
+            availability,
+          )
+          if (failures.length) {
+            const detail = failures
+              .map((f) => `${f.productName} (${f.requested} requested, ${f.available} available)`)
+              .join('; ')
+            throw new Error(`Insufficient stock: ${detail}`)
+          }
+
+          const items: SaleItem[] = input.lines.map((line) => {
+            const pr = byId.get(line.productId)!
+            return {
+              id: newId('sli'),
+              productId: pr.id,
+              productName: pr.name,
+              quantity: line.quantity,
+              unitPrice: pr.priceCents,
+              unitCost: pr.costCents,
+              lineTotal: pr.priceCents * line.quantity,
+            }
+          })
+
+          const totals = computeDocument(
+            { labourCost: 0, partsCost: sumLines(items), discount: input.discount ?? 0, taxRate: input.taxRate ?? 0 },
+            input.taxEnabled ?? true,
+          )
+
+          const saleId = newId('sal')
+          const now = nowIso()
+          const sale: Sale = {
+            id: saleId,
+            receiptNumber: await nextReceiptNumber(input.branchId),
+            branchId: input.branchId,
+            customerId: input.customerId ?? '',
+            customerName: customer?.fullName ?? '',
+            items,
+            subtotal: totals.gross,
+            discount: totals.discount,
+            taxRate: totals.taxRate,
+            taxAmount: totals.taxAmount,
+            total: totals.total,
+            amountPaid: input.amountPaid ?? totals.total,
+            paymentMethod: input.paymentMethod,
+            cashierId: input.cashierId,
+            refundedFromSaleId: '',
+            idempotencyKey: input.idempotencyKey ?? '',
+            createdAt: now,
+          }
+
+          // §28.2 — every stock change names the transaction that caused it.
+          for (const line of input.lines) {
+            const pr = byId.get(line.productId)!
+            const before = pr.stockOnHand
+            const after = before - line.quantity
+            await raw.products.update(pr.id, { stockOnHand: after, updatedAt: now })
+            await raw.movements.add(
+              StockMovement.parse({
+                id: newId('mv'),
+                productId: pr.id,
+                branchId: input.branchId,
+                type: 'sale_out',
+                qty: -line.quantity,
+                before,
+                after,
+                reason: `Sale ${sale.receiptNumber}`,
+                refId: saleId,
+                actorId: input.cashierId,
+                at: now,
+              }),
+            )
+          }
+
+          await raw.sales.add(sale)
+          return sale
+        })
+      },
+
+      async refund(saleId: string, input: RefundInput): Promise<Refund> {
+        if (!input.reason.trim()) throw new Error('A refund needs a reason.')
+
+        return raw.transaction('rw', [raw.sales, raw.refunds, raw.products, raw.movements], async () => {
+          const sale = await raw.sales.get(saleId)
+          if (!sale) throw new Error(`No sale ${saleId}`)
+
+          // §28.6 — a refund is bounded by what was actually paid on the
+          // original sale, less anything already refunded.
+          const prior = await raw.refunds.where('originalSaleId').equals(saleId).toArray()
+          const alreadyRefunded = prior.reduce((sum, r) => sum + r.amount, 0)
+          const refundable = Math.max(0, sale.amountPaid - alreadyRefunded)
+          const amount = input.amount ?? refundable
+          if (amount <= 0) throw new Error('Enter a refund amount greater than zero.')
+          if (amount > refundable) {
+            throw new Error(
+              `Cannot refund Rs. ${(amount / 100).toFixed(2)} — only Rs. ${(refundable / 100).toFixed(2)} remains on this sale.`,
+            )
+          }
+
+          const now = nowIso()
+          const refund: Refund = {
+            id: newId('rfd'),
+            originalSaleId: saleId,
+            invoiceId: '',
+            amount,
+            reason: input.reason.trim(),
+            approvedBy: input.approvedBy,
+            createdAt: now,
+          }
+
+          if (input.restoreStock !== false) {
+            for (const item of sale.items) {
+              const pr = await raw.products.get(item.productId)
+              if (!pr) continue
+              const before = pr.stockOnHand
+              const after = before + item.quantity
+              await raw.products.update(pr.id, { stockOnHand: after, updatedAt: now })
+              await raw.movements.add(
+                StockMovement.parse({
+                  id: newId('mv'),
+                  productId: pr.id,
+                  branchId: sale.branchId,
+                  type: 'adjustment',
+                  qty: item.quantity,
+                  before,
+                  after,
+                  reason: `Return against ${sale.receiptNumber}`,
+                  refId: refund.id,
+                  actorId: input.approvedBy,
+                  at: now,
+                }),
+              )
+            }
+          }
+
+          // §28.18 — the original sale is never edited or deleted.
+          await raw.refunds.add(refund)
+          return refund
+        })
+      },
+
+      nextReceiptNumber,
+    },
+
+    refunds: {
+      list: () => raw.refunds.orderBy('createdAt').reverse().toArray(),
+      forSale: (saleId) => raw.refunds.where('originalSaleId').equals(saleId).toArray(),
     },
   }
 

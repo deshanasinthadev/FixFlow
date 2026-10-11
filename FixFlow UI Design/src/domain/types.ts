@@ -422,6 +422,11 @@ export interface Sale {
   cashierId: ID
   /** Set when this sale reverses an earlier one (§16, §28.6). */
   refundedFromSaleId: ID | ''
+  /**
+   * Caller-supplied key so a retried checkout cannot create a second sale
+   * (§28.16). Empty for sales created without one.
+   */
+  idempotencyKey: string
   createdAt: ISODate
 }
 

@@ -2,9 +2,13 @@ import type {
   Branch,
   Customer,
   Device,
+  PaymentMethodId,
   RepairJob,
   RepairStatus,
   RepairStatusHistoryEntry,
+  Refund,
+  StockReservation,
+  Sale,
   User,
 } from '../domain/types'
 import type { ImportBatch, Product, StockMovement, StockMovementType } from './schema'
@@ -50,6 +54,13 @@ export interface Db {
     update(id: string, patch: Partial<ProductInput>): Promise<Product>
     remove(id: string): Promise<void>
     adjustStock(a: StockAdjust): Promise<StockMovement>
+    /**
+     * §11 / §28.3 — hold stock for a repair so it cannot be sold twice.
+     * `reserved` is not writable through `update`; this is the only way in.
+     */
+    reserve(productId: string, quantity: number, repairId: string): Promise<StockReservation>
+    releaseReservation(repairId: string): Promise<void>
+    reservations(productId?: string): Promise<StockReservation[]>
   }
 
   movements: {
@@ -117,6 +128,68 @@ export interface Db {
     /** The next job number for a branch, e.g. FX-2026-004822. */
     nextJobNumber(branchId: string, year?: number): Promise<string>
   }
+
+  /** §10 — point of sale. */
+  sales: {
+    list(filter?: SaleFilter): Promise<Sale[]>
+    get(id: string): Promise<Sale | undefined>
+    /**
+     * Validates stock, decrements it, writes the sale and writes one stock
+     * movement per line — all in a single transaction. A failure at any point
+     * leaves the database exactly as it was (§28.15).
+     */
+    checkout(input: CheckoutInput): Promise<Sale>
+    /**
+     * §28.6 — a refund references the original sale and restores stock.
+     * Never edits or deletes the original transaction (§28.18).
+     */
+    refund(saleId: string, input: RefundInput): Promise<Refund>
+    nextReceiptNumber(branchId: string, year?: number): Promise<string>
+  }
+
+  refunds: {
+    list(): Promise<Refund[]>
+    forSale(saleId: string): Promise<Refund[]>
+  }
+}
+
+export interface SaleFilter {
+  branchId?: string
+  cashierId?: string
+  customerId?: string
+  limit?: number
+}
+
+export interface CheckoutLine {
+  productId: string
+  quantity: number
+}
+
+export interface CheckoutInput {
+  branchId: string
+  /** '' is a walk-in sale. */
+  customerId?: string
+  lines: CheckoutLine[]
+  /** Minor units. */
+  discount?: number
+  /** Overrides the product tax rate; defaults to the business setting. */
+  taxRate?: number
+  taxEnabled?: boolean
+  paymentMethod: PaymentMethodId
+  /** Minor units actually received. */
+  amountPaid?: number
+  cashierId: string
+  /** §28.16 — resubmitting with the same key returns the original sale. */
+  idempotencyKey?: string
+}
+
+export interface RefundInput {
+  /** Minor units. Omit to refund the whole sale. */
+  amount?: number
+  reason: string
+  approvedBy: string
+  /** True returns the goods to stock. False for a money-only refund. */
+  restoreStock?: boolean
 }
 
 export type CustomerInput = Omit<Customer, 'id' | 'code' | 'portalToken' | 'createdAt'>
