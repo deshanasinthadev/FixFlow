@@ -773,8 +773,12 @@ function POS({ cart, setCart, actor }: {
   actor: User;
 }) {
   const { db, bump } = useDb();
-  const { data: inventory, loading } = useQuery((d) => d.products.list(), []);
-  const all = inventory ?? [];
+  const { data: posData, loading } = useQuery(
+    async (d) => ({ products: await d.products.list(), held: await d.heldSales.list(actor.branchId) }),
+    [actor.branchId],
+  );
+  const all = posData?.products ?? [];
+  const held = posData?.held ?? [];
 
   const [term, setTerm] = useState("");
   const [category, setCategory] = useState("All products");
@@ -832,6 +836,42 @@ function POS({ cart, setCart, actor }: {
   const availableFor = (product: Product) =>
     product.stockOnHand - product.reserved - (cart[product.id] ?? 0) + (cart[product.id] ?? 0);
 
+  const holdSale = async () => {
+    if (!lines.length) { setError("There is nothing in the cart to hold."); return; }
+    setBusy(true);
+    setError("");
+    try {
+      await db.heldSales.hold({
+        branchId: actor.branchId === "all" ? "br_colombo" : actor.branchId,
+        cashierId: actor.id,
+        items: lines.map((l) => ({ productId: l.product.id, quantity: l.quantity })),
+        discount,
+      });
+      setCart({});
+      setDiscount(0);
+      bump();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not hold the sale.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resume = async (heldId: string) => {
+    const parked = held.find((h) => h.id === heldId);
+    if (!parked) return;
+    setCart(Object.fromEntries(parked.items.map((i) => [i.productId, i.quantity])));
+    setDiscount(parked.discount);
+    setReceipt(null);
+    await db.heldSales.discard(heldId);
+    bump();
+  };
+
+  const discardHeld = async (heldId: string) => {
+    await db.heldSales.discard(heldId);
+    bump();
+  };
+
   const complete = async () => {
     if (!lines.length) { setError("Add at least one product to the cart."); return; }
     setBusy(true);
@@ -873,7 +913,8 @@ function POS({ cart, setCart, actor }: {
       {receipt && <p className="success-text" role="status">Sale {receipt.number} completed · {formatLKR(receipt.total)} · {receipt.method}</p>}
       {error && <p className="danger-text" role="alert">{error}</p>}
       <div className="payment-methods">{(["cash", "card", "bank_transfer"] as const).map((x) => <button className={method === x ? "active" : ""} key={x} onClick={() => setMethod(x)}><Icon name={x === "bank_transfer" ? "transfer" : x}/>{x === "bank_transfer" ? "Bank" : x[0].toUpperCase() + x.slice(1)}</button>)}</div>
-      <Button onClick={complete}>{busy ? "Completing…" : `Complete sale · ${formatLKR(totals.total)}`}</Button><Button kind="secondary">Hold sale</Button>
+      <Button onClick={complete}>{busy ? "Completing…" : `Complete sale · ${formatLKR(totals.total)}`}</Button>
+      {held.length > 0 && <div className="held-sales"><h3>Held sales</h3>{held.map((h) => <div className="held-row" key={h.id}><div><strong>{h.items.reduce((sum, i) => sum + i.quantity, 0)} item{h.items.reduce((sum, i) => sum + i.quantity, 0) === 1 ? "" : "s"}</strong><span>{new Date(h.createdAt).toLocaleTimeString()}{h.customerName ? ` · ${h.customerName}` : " · Walk-in"}</span></div><div className="held-actions"><button className="btn secondary" onClick={() => resume(h.id)}>Resume</button><button className="btn ghost" onClick={() => discardHeld(h.id)}>Discard</button></div></div>)}</div>}<Button kind="secondary" onClick={holdSale}>Hold sale</Button>
     </Card></div>;
 }
 

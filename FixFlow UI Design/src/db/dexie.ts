@@ -4,6 +4,7 @@ import type {
   CashSession,
   Customer,
   CustomerApproval,
+  HeldSale,
   Device,
   Estimate,
   EstimateItem,
@@ -32,6 +33,7 @@ import type {
   CloseCashSessionInput,
   CustomerInput,
   EstimateInput,
+  HoldSaleInput,
   OpenCashSessionInput,
   Db,
   DeviceInput,
@@ -96,6 +98,7 @@ export function createDb(name: string = DB_NAME): Db {
     estimates!: Table<Estimate, string>
     approvals!: Table<CustomerApproval, string>
     cashSessions!: Table<CashSession, string>
+    heldSales!: Table<HeldSale, string>
 
     constructor() {
       super(name)
@@ -125,6 +128,10 @@ export function createDb(name: string = DB_NAME): Db {
       // Version 4 adds cash register sessions (§10).
       this.version(4).stores({
         cashSessions: 'id, branchId, cashierId, openedAt, closedAt',
+      })
+      // Version 5 adds held (parked) carts (§10).
+      this.version(5).stores({
+        heldSales: 'id, branchId, cashierId, createdAt',
       })
     }
   }
@@ -1072,6 +1079,51 @@ export function createDb(name: string = DB_NAME): Db {
       },
 
       nextEstimateNumber,
+    },
+
+    // --- held carts (§10) --------------------------------------------------
+
+    heldSales: {
+      async list(branchId?: string) {
+        const rows = branchId
+          ? await raw.heldSales.where('branchId').equals(branchId).toArray()
+          : await raw.heldSales.toArray()
+        return rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      },
+
+      get: (id) => raw.heldSales.get(id),
+
+      async hold(input: HoldSaleInput): Promise<HeldSale> {
+        const items = input.items
+          .map((line) => ({ productId: line.productId, quantity: Math.round(line.quantity) }))
+          .filter((line) => line.quantity > 0)
+        if (!items.length) throw new Error('There is nothing in the cart to hold.')
+
+        return raw.transaction('rw', [raw.heldSales, raw.branches, raw.products], async () => {
+          const branch = await raw.branches.get(input.branchId)
+          if (!branch) throw new Error(`Unknown branch ${input.branchId}`)
+          for (const line of items) {
+            const product = await raw.products.get(line.productId)
+            if (!product) throw new Error(`Unknown product ${line.productId}`)
+          }
+
+          const held: HeldSale = {
+            id: newId('hld'),
+            branchId: input.branchId,
+            cashierId: input.cashierId,
+            customerId: input.customerId ?? '',
+            customerName: input.customerName ?? '',
+            items,
+            discount: input.discount ?? 0,
+            note: input.note?.trim() ?? '',
+            createdAt: nowIso(),
+          }
+          await raw.heldSales.add(held)
+          return held
+        })
+      },
+
+      discard: (id) => raw.heldSales.delete(id),
     },
 
     // --- cash sessions (§10) -----------------------------------------------

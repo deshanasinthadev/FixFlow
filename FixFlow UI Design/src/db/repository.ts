@@ -2,6 +2,7 @@ import type {
   Branch,
   CashSession,
   Customer,
+  HeldSale,
   CustomerApproval,
   Device,
   Estimate,
@@ -176,6 +177,15 @@ export interface Db {
     nextEstimateNumber(branchId: string, year?: number): Promise<string>
   }
 
+  /** §10 — carts set aside mid-sale. Holding reserves no stock. */
+  heldSales: {
+    list(branchId?: string): Promise<HeldSale[]>
+    get(id: string): Promise<HeldSale | undefined>
+    hold(input: HoldSaleInput): Promise<HeldSale>
+    /** Removes a held cart, e.g. after it is resumed or abandoned. */
+    discard(id: string): Promise<void>
+  }
+
   /** §10 — cash register sessions: open with a float, close against a count. */
   cashSessions: {
     list(filter?: { branchId?: string; status?: 'open' | 'closed' }): Promise<CashSession[]>
@@ -212,6 +222,16 @@ export interface EstimateInput {
   notes?: string
   expiresAt?: string
   actorId: string
+}
+
+export interface HoldSaleInput {
+  branchId: string
+  cashierId: string
+  customerId?: string
+  customerName?: string
+  items: { productId: string; quantity: number }[]
+  discount?: number
+  note?: string
 }
 
 export interface OpenCashSessionInput {

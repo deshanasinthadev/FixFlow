@@ -564,6 +564,24 @@ export interface Expense {
   createdAt: ISODate
 }
 
+/**
+ * A cart set aside mid-sale (§10 "hold/park"). Holding must not touch stock:
+ * the goods are still on the shelf and still sellable, so a held cart reserves
+ * nothing until it is completed.
+ */
+export interface HeldSale {
+  id: ID
+  branchId: ID
+  cashierId: ID
+  customerId: ID | ''
+  customerName: string
+  items: { productId: ID; quantity: number }[]
+  /** Minor units. */
+  discount: MinorUnits
+  note: string
+  createdAt: ISODate
+}
+
 export interface CashSession {
   id: ID
   branchId: ID
