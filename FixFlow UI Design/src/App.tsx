@@ -3,6 +3,7 @@ import { Icon, type IconName } from "./components/Icon";
 import { ProductsPage } from "./modules/products/ProductsPage";
 import { CashRegisterPage } from "./modules/pos/CashRegisterPage";
 import { SalesPage } from "./modules/pos/SalesPage";
+import { EstimatesPage } from "./modules/estimates/EstimatesPage";
 import { deriveNotifications } from "./modules/notifications/derive";
 import { toCsv } from "./csv/pipeline";
 import { downloadText, stamp } from "./lib/download";
@@ -307,12 +308,13 @@ function App() {
           {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
           {page === "Repair Details" && <RepairDetails jobNumber={param} technician={user.role === "Technician"} actor={user} navigate={navigate}/>}
           {page === "My Repair Details" && <CustomerRepairDetails jobNumber={param} jobs={scopedJobs}/>}
+          {page === "Estimates" && <EstimatesPage branchId={user.branchId} actorId={user.id} canDecide={user.role === "Admin" || user.role === "Manager"} canSend={user.role !== "Customer"} customerScope={user.role === "Customer" ? user.customerId : undefined}/>}
           {page === "Cash Register" && <CashRegisterPage branchId={user.branchId} cashierId={user.id}/>}
           {(page === "Sales" || page === "Refunds") && <SalesPage branchId={user.branchId} actorId={user.id}/>}
           {page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
           {(page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
           {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis/>}
-          {!["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds"].includes(page) && <ModulePreview page={page} user={user} source={{ repairs: scopedJobs, products: scopedProducts }}/>}
+          {!["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds", "Estimates"].includes(page) && <ModulePreview page={page} user={user} source={{ repairs: scopedJobs, products: scopedProducts }}/>}
         </main>
       </div>
 
