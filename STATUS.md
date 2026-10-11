@@ -214,8 +214,15 @@ that is not the same as proving the screen calls them.
 - Estimates, invoices, payments, suppliers, warranties, finance, reports and
   settings have no screens.
 - `prefers-reduced-motion` has **0** matches in `index.css` (§29).
-- Tax is seeded as disabled but `LK_STANDARD_VAT = 18` is still hardcoded per
-  product in `seed.ts` (§3).
+- **Tax is off, but by hardcoding rather than by configuration (§3).** The POS
+  passes `taxRate: 0` and `taxEnabled: false` literally (`App.tsx:896`, `:965`);
+  it never reads `settings.taxEnabled`. Seeded products do carry
+  `taxRate: 18` (`seed.ts:54`, via `LK_STANDARD_VAT`), but nothing consumes it
+  for tax today — the POS supplies its own zero — so there is **no live
+  mischarge**. The consequence is the reverse of a bug: flipping the settings
+  toggle to true would *not* start charging tax, because the POS ignores
+  settings. `LK_STANDARD_VAT` is also the default for new products and the CSV
+  template, which is a legitimate use.
 - Estimates have no screen. The rules and persistence are tested; a user cannot
   yet quote or approve from the UI.
 - Two repair state machines coexist: the legacy `repairService.ALLOWED_TRANSITIONS`
