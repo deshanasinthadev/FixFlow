@@ -301,7 +301,7 @@ function App() {
             </div>
           </div>
 
-          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures}/> : <RoleDashboard user={user} data={scopedRepairs} navigate={navigate} figures={figures} sales={scopedSales}/>)}
+          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures}/> : <RoleDashboard user={user} data={scopedRepairs} jobs={scopedJobs} navigate={navigate} figures={figures} sales={scopedSales}/>)}
           {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
           {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
           {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
@@ -462,7 +462,7 @@ function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void;
   </>;
 }
 
-function RoleDashboard({ user, data, navigate, figures, sales }: { user: User; data: RepairRow[]; navigate: (page: string, param?: string) => void; figures: DashboardFigures; sales: Sale[] }) {
+function RoleDashboard({ user, data, jobs, navigate, figures, sales }: { user: User; data: RepairRow[]; jobs: RepairJob[]; navigate: (page: string, param?: string) => void; figures: DashboardFigures; sales: Sale[] }) {
   if (user.role === "Customer") {
     const repair = data[0];
     // Every figure below is computed from this visitor's own records. The card
@@ -472,6 +472,11 @@ function RoleDashboard({ user, data, navigate, figures, sales }: { user: User; d
     const mySales = sales.filter((sale) => sale.customerId === user.customerId)
     const outstanding = mySales.reduce((sum, sale) => sum + Math.max(0, sale.total - sale.amountPaid), 0)
     const pendingQuotes = data.filter((row) => row.status === "Awaiting Approval").length
+    // The timeline used to mark steps 1-3 complete and step 4 current for
+    // everyone. Now it comes from the repair's actual status, via the same
+    // five-step customer view the repair details page uses.
+    const portalJob = repair ? jobs.find((j) => j.jobNumber === repair.id) : undefined
+    const portalProgress = portalJob ? customerProgress(portalJob.status) : null
     return <div className="customer-dashboard">
       <Card className="customer-status-hero"><div className="customer-status-copy"><span className="portal-kicker">ACTIVE REPAIR</span><div><h2>{repair?.device || "No active repairs"}</h2>{repair && <Badge>{repair.status}</Badge>}</div><p>{repair?.id} · Estimated completion {repair?.eta}</p><Button onClick={() => navigate("My Repair Details")}>View repair details <Icon name="arrow" size={15}/></Button></div><div className="status-device"><Icon name="laptop" size={42}/><span>Repair in progress</span></div></Card>
       <div className="kpi-grid customer-kpis">
@@ -481,7 +486,11 @@ function RoleDashboard({ user, data, navigate, figures, sales }: { user: User; d
           ["Outstanding Invoice", formatLKR(outstanding), "receipt", "blue"],
         ].map(([label, value, icon, tone]) => <Card className="kpi" key={label}><div className={`kpi-icon ${tone}`}><Icon name={icon as IconName}/></div><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div><div className="kpi-change positive">From your records <span>your account only</span></div></Card>)}
       </div>
-      <div className="customer-home-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Repair progress</h2><p>We'll notify you whenever your repair moves forward.</p></div><Badge>{repair?.status || "No repair"}</Badge></div><div className="portal-progress">{["Received","Diagnosing","Repairing","Testing","Ready for Pickup","Delivered"].map((item, index) => <div className={index < 3 ? "complete" : index === 3 ? "current" : ""} key={item}><span>{index < 3 ? <Icon name="check" size={14}/> : index + 1}</span><div><strong>{item}</strong><small>{index < 3 ? "Completed" : index === 3 ? "Next quality check" : "Pending"}</small></div></div>)}</div></Card>
+      <div className="customer-home-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Repair progress</h2><p>We'll notify you whenever your repair moves forward.</p></div><Badge>{repair?.status || "No repair"}</Badge></div><div className="portal-progress">{portalProgress === null
+            ? <p className="muted">No repair records to show progress for.</p>
+            : portalProgress.cancelled
+              ? <p className="danger-text" role="status">This repair was cancelled. Please contact the branch if that is unexpected.</p>
+              : portalProgress.steps.map((item, index) => <div className={index < portalProgress.current ? "complete" : index === portalProgress.current ? "current" : ""} key={item}><span>{index < portalProgress.current ? <Icon name="check" size={14}/> : index + 1}</span><div><strong>{item}</strong><small>{index < portalProgress.current ? "Completed" : index === portalProgress.current ? "In progress" : "Pending"}</small></div></div>)}</div></Card>
         <Card className="portal-actions"><div className="card-head"><div><h2>Needs your attention</h2><p>Actions for your account</p></div></div>{pendingQuotes > 0 && <div className="attention-item"><div className="kpi-icon pink"><Icon name="file"/></div><div><strong>Estimate ready to review</strong><span>{pendingQuotes} repair{pendingQuotes === 1 ? "" : "s"} awaiting your approval</span></div><Icon name="chevron"/></div>}
           {repair && <div className="attention-item"><div className="kpi-icon blue"><Icon name="bell"/></div><div><strong>Latest update</strong><span>{repair.id} is {repair.status}</span></div><Icon name="chevron"/></div>}
           {pendingQuotes === 0 && !repair && <p className="muted">Nothing needs your attention right now.</p>}<Button kind="secondary" onClick={() => navigate("Support")}>Contact support</Button></Card>
