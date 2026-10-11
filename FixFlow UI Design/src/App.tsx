@@ -13,9 +13,9 @@ import { downloadText, stamp } from "./lib/download";
 import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
 import { useDb, useQuery } from "./db/store";
 import { computeDocument } from "./domain/calculations";
-import { formatLKR } from "./lib/format";
+import { formatLKR, formatLKRCompact } from "./lib/format";
 import { nextRepairStatuses, mayPerformRepairTransition } from "./domain/workflows";
-import { computeDashboardFigures, type DashboardFigures } from "./modules/dashboard/figures";
+import { computeDashboardFigures, computeMoneyFigures, computeSeries, countOverdueRepairs, availableUnits, type DashboardFigures, type MoneyFigures, type SeriesPoint } from "./modules/dashboard/figures";
 import { inspectionPlan, suggestDiagnosis, type DiagnosisResult } from "./modules/diagnosis/engine";
 import type { RepairJob, RepairStatus, Sale } from "./domain/types";
 import type { Product } from "./db/schema";
@@ -77,14 +77,6 @@ const roleNav: Record<Role, ReadonlyArray<{ label: string; items: ReadonlyArray<
   ],
 };
 
-const products = [
-  { name: "65W Laptop Charger", sku: "CHR-65W-001", price: 6500, stock: 14, icon: "laptop" as IconName, cat: "Chargers" },
-  { name: "USB-C Fast Cable", sku: "CBL-USC-014", price: 1850, stock: 32, icon: "transfer" as IconName, cat: "Cables" },
-  { name: "DDR4 8GB RAM", sku: "RAM-D4-8GB", price: 9200, stock: 8, icon: "box" as IconName, cat: "Spare Parts" },
-  { name: "512GB NVMe SSD", sku: "SSD-NV-512", price: 14500, stock: 11, icon: "package" as IconName, cat: "Spare Parts" },
-  { name: "iPhone 13 Display", sku: "DSP-IP13-O", price: 38500, stock: 3, icon: "phone" as IconName, cat: "Spare Parts" },
-  { name: "Premium Thermal Paste", sku: "SRV-THM-005", price: 2200, stock: 24, icon: "tool" as IconName, cat: "Services" },
-];
 
 function Button({ children, kind = "primary", icon, onClick, disabled }: { children: React.ReactNode; kind?: "primary" | "secondary" | "ghost"; icon?: IconName; onClick?: () => void; disabled?: boolean }) {
   return <button className={`btn ${kind}`} onClick={onClick} disabled={disabled} aria-disabled={disabled || undefined}>{icon && <Icon name={icon} size={16} />}<span>{children}</span></button>;
@@ -95,7 +87,12 @@ function Badge({ children, tone }: { children: React.ReactNode; tone?: string })
   return <span className={`badge ${t}`}><span className="badge-dot"/>{children}</span>;
 }
 
-function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+function Card({ children, className = "", onClick }: { children: React.ReactNode; className?: string; onClick?: () => void }) {
+  // A tile that opens its page is a button, so it is rendered as one for the
+  // keyboard and screen readers rather than a div with a click handler.
+  if (onClick) {
+    return <button type="button" className={`card ${className} card-link`} onClick={onClick}>{children}</button>;
+  }
   return <section className={`card ${className}`}>{children}</section>;
 }
 
@@ -130,6 +127,8 @@ function App() {
       users: await d.users.list(),
       sales: await d.sales.list(),
       products: await d.products.list(),
+      invoices: await d.invoices.list(),
+      expenses: await d.expenses.list(),
     }),
     [],
   );
@@ -175,6 +174,61 @@ function App() {
     const branchId = user?.role === "Admin" ? "" : user?.branchId ?? "";
     return branchId ? all.filter((product) => product.branchId === branchId) : all;
   }, [repairData, user]);
+  const scopedInvoices = useMemo(() => {
+    const all = repairData?.invoices ?? [];
+    const branchId = user?.role === "Admin" ? "" : user?.branchId ?? "";
+    return branchId ? all.filter((invoice) => invoice.branchId === branchId) : all;
+  }, [repairData, user]);
+  const scopedExpenses = useMemo(() => {
+    const all = repairData?.expenses ?? [];
+    const branchId = user?.role === "Admin" ? "" : user?.branchId ?? "";
+    return branchId ? all.filter((expense) => expense.branchId === branchId) : all;
+  }, [repairData, user]);
+  /** §1 — money tiles and the chart series, all from saved records. */
+  const money = useMemo(
+    () => computeMoneyFigures({ sales: scopedSales, invoices: scopedInvoices, expenses: scopedExpenses }),
+    [scopedSales, scopedInvoices, scopedExpenses],
+  );
+  const weekSeries = useMemo(
+    () => computeSeries({ sales: scopedSales, invoices: scopedInvoices, expenses: scopedExpenses }, "day", 7),
+    [scopedSales, scopedInvoices, scopedExpenses],
+  );
+  const monthSeries = useMemo(
+    () => computeSeries({ sales: scopedSales, invoices: scopedInvoices, expenses: scopedExpenses }, "month", 6),
+    [scopedSales, scopedInvoices, scopedExpenses],
+  );
+  const overdueRepairs = useMemo(() => countOverdueRepairs(scopedJobs), [scopedJobs]);
+  /**
+   * The low-stock list the dashboard shows. Computed from available units, not
+   * stock on hand: stock reserved for a repair is not sellable, so a warning
+   * based on the raw figure would arrive after the shelf is already promised
+   * (§28.3).
+   */
+  const lowStockItems = useMemo(
+    () => scopedProducts
+      .filter((product) => availableUnits(product) <= product.minStock)
+      .sort((a, b) => availableUnits(a) - availableUnits(b)),
+    [scopedProducts],
+  );
+  /** Real counts per status, replacing the hardcoded donut figures. */
+  const statusCounts = useMemo<Array<[string, number, string]>>(() => {
+    const groups: Array<[string, string[], string]> = [
+      ["In progress", ["diagnosing", "approved", "repairing"], "purple"],
+      ["Testing", ["testing"], "blue"],
+      ["Ready for pickup", ["ready_for_collection"], "cyan"],
+      ["Awaiting approval", ["waiting_for_approval"], "pink"],
+      ["Waiting for parts", ["waiting_for_parts"], "amber"],
+    ];
+    return groups.map(([label, statuses, tone]) => [
+      label,
+      scopedJobs.filter((job) => statuses.includes(job.status)).length,
+      tone,
+    ]);
+  }, [scopedJobs]);
+  const recentSales = useMemo(
+    () => [...scopedSales].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).slice(0, 5),
+    [scopedSales],
+  );
   const figures = useMemo(
     () => computeDashboardFigures({ repairs: scopedJobs, sales: scopedSales, products: scopedProducts }),
     [scopedJobs, scopedSales, scopedProducts],
@@ -305,7 +359,7 @@ function App() {
             </div>
           </div>
 
-          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures}/> : <RoleDashboard user={user} data={scopedRepairs} jobs={scopedJobs} navigate={navigate} figures={figures} sales={scopedSales}/>)}
+          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures} money={money} weekSeries={weekSeries} monthSeries={monthSeries} overdueRepairs={overdueRepairs} lowStock={lowStockItems} statusCounts={statusCounts} recentSales={recentSales}/> : <RoleDashboard user={user} data={scopedRepairs} jobs={scopedJobs} navigate={navigate} figures={figures} sales={scopedSales} lowStock={lowStockItems}/>)}
           {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
           {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
           {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
@@ -412,47 +466,95 @@ function Login({ dark, setDark, onLogin }: { dark: boolean; setDark: (value: boo
   </div>;
 }
 
-function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void; data: RepairRow[]; figures: DashboardFigures }) {
+/**
+ * A line chart built from the figures it is handed.
+ *
+ * The scale is derived from the data, so an empty week renders a flat line at
+ * zero rather than a shape that implies activity. The old chart was a fixed SVG
+ * path — the same curve whatever was in the database.
+ */
+function LineChart({ points }: { points: SeriesPoint[] }) {
+  const W = 700, H = 220, PAD = 8;
+  const peak = Math.max(1, ...points.map((point) => Math.max(point.revenue, point.expenses)));
+  const x = (i: number) => points.length <= 1 ? W / 2 : (i / (points.length - 1)) * W;
+  const y = (value: number) => H - PAD - (value / peak) * (H - PAD * 2);
+
+  const path = (pick: (point: SeriesPoint) => number) =>
+    points.map((point, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)} ${y(pick(point)).toFixed(1)}`).join(" ");
+  const revenue = path((point) => point.revenue);
+
+  return <div className="line-chart">
+    <div className="y-labels">
+      {[1, 0.75, 0.5, 0.25, 0].map((fraction) => <span key={fraction}>{formatLKRCompact(Math.round(peak * fraction))}</span>)}
+    </div>
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="Revenue and expenses over time">
+      <defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#8b5cf6" stopOpacity=".24"/><stop offset="1" stopColor="#8b5cf6" stopOpacity="0"/></linearGradient></defs>
+      <path className="area" d={`${revenue} L${W} ${H} L0 ${H}Z`}/>
+      <path className="chart-line revenue" d={revenue}/>
+      <path className="chart-line payments" d={path((point) => point.expenses)}/>
+    </svg>
+    <div className="x-labels">{points.map((point) => <span key={point.key}>{point.label}</span>)}</div>
+  </div>;
+}
+
+function Dashboard({ navigate, data, figures, money, weekSeries, monthSeries, overdueRepairs, lowStock, statusCounts, recentSales }: {
+  navigate: (p: string) => void
+  data: RepairRow[]
+  figures: DashboardFigures
+  money: MoneyFigures
+  weekSeries: SeriesPoint[]
+  monthSeries: SeriesPoint[]
+  overdueRepairs: number
+  lowStock: Product[]
+  statusCounts: Array<[string, number, string]>
+  recentSales: Sale[]
+}) {
   /**
    * §6 — every figure comes from saved records. The two tiles the old
    * dashboard had for "Outstanding" and "Today's Expenses" are gone rather
    * than faked: there is no invoice or expense module behind them yet.
    */
   const kpis = [
-    ["Today's Sales", formatLKR(figures.todaySales), `${figures.todaySaleCount} sale${figures.todaySaleCount === 1 ? "" : "s"} today`, "sale", "blue"],
-    ["Active Repairs", String(figures.activeRepairs), `${figures.unassignedRepairs} unassigned`, "tool", "purple"],
-    ["Ready for Pickup", String(figures.readyForPickup), `${figures.awaitingApproval} awaiting approval`, "check", "cyan"],
-    ["Low Stock Items", String(figures.lowStockItems), `${figures.criticalStockItems} critical`, "alert", "amber"],
+    ["Today's Sales", formatLKR(money.todaySales), `${figures.todaySaleCount} sale${figures.todaySaleCount === 1 ? "" : "s"} today`, "sale", "blue", "Sales"],
+    ["Repair Income", formatLKR(money.todayRepairIncome), "collected on repair invoices", "tool", "purple", "Estimates"],
+    ["Today's Expenses", formatLKR(money.todayExpenses), "recorded against this branch", "receipt", "amber", "Expenses"],
+    ["Today's Profit", formatLKR(money.todayProfit), "after cost of goods and expenses", "wallet", money.todayProfit < 0 ? "pink" : "cyan", "Finance"],
+    ["Active Repairs", String(figures.activeRepairs), `${figures.unassignedRepairs} unassigned · ${overdueRepairs} overdue`, "tool", "purple", "Repairs"],
+    ["Low Stock Items", String(figures.lowStockItems), `${figures.criticalStockItems} critical`, "alert", "amber", "Inventory"],
   ] as const;
+  const [chartRange, setChartRange] = useState<"day" | "month">("day");
+  const chart = chartRange === "day" ? weekSeries : monthSeries;
   return <>
     <div className="kpi-grid">
-      {kpis.map(([label, value, change, icon, tone]) => <Card className="kpi" key={label}>
+      {kpis.map(([label, value, change, icon, tone, target]) => <Card className="kpi" key={label} onClick={() => navigate(target)}>
         <div className={`kpi-icon ${tone}`}><Icon name={icon}/></div>
-        <div className="kpi-label">{label}<Icon name="more" size={16}/></div>
+        <div className="kpi-label">{label}<Icon name="arrow" size={16}/></div>
         <div className="kpi-value">{value}</div>
-        <div className={`kpi-change ${change.startsWith("+") ? "positive" : ""}`}>{change} <span>{label === "Today's Sales" ? "vs yesterday" : "updated now"}</span></div>
+        <div className="kpi-change">{change}</div>
       </Card>)}
     </div>
     <div className="dashboard-grid">
       <Card className="sales-chart">
-        <div className="card-head"><div><h2>Sales overview</h2><p>Illustrative curve &mdash; the figures beside it are real; a reporting module will replace the chart</p></div></div>
-        <div className="chart-meta"><div><span className="legend purple"/><small>Sales today</small><strong>{formatLKR(figures.todaySales)}</strong></div><div><span className="legend blue"/><small>Active repairs</small><strong>{figures.activeRepairs}</strong></div></div>
-        <div className="line-chart">
-          <div className="y-labels"><span>200K</span><span>150K</span><span>100K</span><span>50K</span><span>0</span></div>
-          <svg viewBox="0 0 700 220" preserveAspectRatio="none">
-            <defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#8b5cf6" stopOpacity=".24"/><stop offset="1" stopColor="#8b5cf6" stopOpacity="0"/></linearGradient></defs>
-            <path className="area" d="M0 176 C55 150 76 167 120 131 S192 143 240 92 S322 129 370 82 S449 110 498 61 S572 91 620 46 S672 58 700 32 L700 220 L0 220Z"/>
-            <path className="chart-line revenue" d="M0 176 C55 150 76 167 120 131 S192 143 240 92 S322 129 370 82 S449 110 498 61 S572 91 620 46 S672 58 700 32"/>
-            <path className="chart-line payments" d="M0 190 C60 181 80 143 130 161 S205 124 250 144 S321 106 380 121 S455 83 510 101 S584 67 635 80 S680 53 700 67"/>
-          </svg>
-          <div className="x-labels"><span>Feb 18</span><span>Feb 24</span><span>Mar 02</span><span>Mar 08</span><span>Mar 14</span><span>Mar 18</span></div>
+        <div className="card-head">
+          <div><h2>Income overview</h2><p>Revenue and expenses from saved records</p></div>
+          <div className="chart-toggle">
+            <button type="button" className={chartRange === "day" ? "active" : ""} onClick={() => setChartRange("day")}>Week</button>
+            <button type="button" className={chartRange === "month" ? "active" : ""} onClick={() => setChartRange("month")}>Month</button>
+          </div>
         </div>
+        <div className="chart-meta">
+          <div><span className="legend purple"/><small>Revenue in view</small><strong>{formatLKR(chart.reduce((sum, point) => sum + point.revenue, 0))}</strong></div>
+          <div><span className="legend blue"/><small>Expenses in view</small><strong>{formatLKR(chart.reduce((sum, point) => sum + point.expenses, 0))}</strong></div>
+        </div>
+        <LineChart points={chart}/>
       </Card>
       <Card className="repair-overview">
-        <div className="card-head"><div><h2>Repair overview</h2><p>Current workflow</p></div></div>
-        <div className="donut-wrap"><div className="donut"><div><strong>64</strong><span>Total</span></div></div></div>
+        <div className="card-head"><div><h2>Repair overview</h2><p>Current workflow</p></div><Button kind="ghost" onClick={() => navigate("Repair Board")}>Board <Icon name="arrow" size={15}/></Button></div>
+        <div className="donut-wrap"><div className="donut"><div><strong>{statusCounts.reduce((sum, row) => sum + row[1], 0)}</strong><span>In workflow</span></div></div></div>
         <div className="status-list">
-          {[["In progress", 18, "purple"], ["Testing", 12, "blue"], ["Ready for pickup", 12, "cyan"], ["Awaiting approval", 9, "pink"], ["Other", 13, "slate"]].map(([a,b,c]) => <div key={String(a)}><span className={`legend ${c}`}/><span>{a}</span><strong>{b}</strong></div>)}
+          {statusCounts.every((row) => row[1] === 0)
+            ? <p className="muted">No repairs are currently in the workflow.</p>
+            : statusCounts.filter((row) => row[1] > 0).map(([label, count, tone]) => <div key={label}><span className={`legend ${tone}`}/><span>{label}</span><strong>{count}</strong></div>)}
         </div>
       </Card>
     </div>
@@ -462,15 +564,30 @@ function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void;
         <RepairTable compact navigate={navigate} data={data}/>
       </Card>
       <Card className="stock-card">
-        <div className="card-head"><div><h2>Low stock</h2><p>Items needing attention</p></div><span className="count-badge">8</span></div>
-        {products.slice(0,4).map((p, i) => <div className="stock-row" key={p.name}><div className="product-mini"><Icon name={p.icon}/></div><div><strong>{p.name}</strong><span>{p.sku}</span></div><div><strong className={i < 2 ? "danger-text" : ""}>{i + 2} left</strong><span>Min. {i+5}</span></div></div>)}
-        <Button kind="secondary" onClick={() => navigate("Inventory")}>Open inventory</Button>
+        <div className="card-head"><div><h2>Low stock</h2><p>At or below the reorder level</p></div><span className="count-badge">{lowStock.length}</span></div>
+        {lowStock.length === 0
+          ? <p className="muted">Nothing is at or below its reorder level.</p>
+          : lowStock.slice(0, 4).map((product) => {
+              const available = product.stockOnHand - product.reserved;
+              return <div className="stock-row" key={product.id}>
+                <div className="product-mini"><Icon name="box"/></div>
+                <div><strong>{product.name}</strong><span>{product.sku}</span></div>
+                <div><strong className={available <= 0 ? "danger-text" : ""}>{available} left</strong><span>Min. {product.minStock}</span></div>
+              </div>;
+            })}
+        <Button kind="secondary" onClick={() => navigate("Stock Adjustments")}>Stock adjustments</Button>
+      </Card>
+      <Card className="recent">
+        <div className="card-head"><div><h2>Recent sales</h2><p>Latest takings in this branch</p></div><Button kind="ghost" onClick={() => navigate("Sales")}>View all <Icon name="arrow" size={15}/></Button></div>
+        {recentSales.length === 0
+          ? <p className="muted">No sales recorded yet.</p>
+          : <div className="transaction-list">{recentSales.map((sale) => <div key={sale.id}><div className="product-mini"><Icon name="receipt"/></div><div><strong>{sale.receiptNumber}</strong><span>{sale.customerName || "Walk-in customer"} · {new Date(sale.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span></div><strong>{formatLKR(sale.total)}</strong></div>)}</div>}
       </Card>
     </div>
   </>;
 }
 
-function RoleDashboard({ user, data, jobs, navigate, figures, sales }: { user: User; data: RepairRow[]; jobs: RepairJob[]; navigate: (page: string, param?: string) => void; figures: DashboardFigures; sales: Sale[] }) {
+function RoleDashboard({ user, data, jobs, navigate, figures, sales, lowStock }: { user: User; data: RepairRow[]; jobs: RepairJob[]; navigate: (page: string, param?: string) => void; figures: DashboardFigures; sales: Sale[]; lowStock: Product[] }) {
   if (user.role === "Customer") {
     const repair = data[0];
     // Every figure below is computed from this visitor's own records. The card
@@ -536,7 +653,7 @@ function RoleDashboard({ user, data, jobs, navigate, figures, sales }: { user: U
     <div className="kpi-grid">{cards.map(([label, value, icon, tone, note]) => <Card className="kpi" key={label}><div className={`kpi-icon ${tone}`}><Icon name={icon}/></div><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div><div className="kpi-change positive">{note}</div></Card>)}</div>
     {user.role === "Technician" ? <Card className="table-card role-table"><div className="card-head table-title"><div><h2>My assigned repairs</h2><p>Only work assigned directly to your technician account.</p></div><Button kind="ghost" onClick={() => navigate("My Repairs")}>View workspace <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate} showFinancial={false}/></Card> :
       user.role === "Cashier" ? <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Recent branch transactions</h2><p>Payments processed at your register</p></div><Button kind="ghost" onClick={() => navigate("POS")}>Open POS <Icon name="arrow" size={14}/></Button></div><TransactionList sales={sales}/></Card></div> :
-      <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Branch repair activity</h2><p>Authorized Colombo 03 records only</p></div><Button kind="ghost" onClick={() => navigate("Repairs")}>View all <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate}/></Card><Card className="stock-card"><div className="card-head"><div><h2>Branch alerts</h2><p>Items needing attention</p></div><span className="count-badge">6</span></div>{products.slice(0,4).map((product, index) => <div className="stock-row" key={product.name}><div className="product-mini"><Icon name={product.icon}/></div><div><strong>{product.name}</strong><span>{product.sku}</span></div><div><strong className={index < 2 ? "danger-text" : ""}>{index + 2} left</strong><span>Colombo 03</span></div></div>)}</Card></div>}
+      <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Branch repair activity</h2><p>Authorized Colombo 03 records only</p></div><Button kind="ghost" onClick={() => navigate("Repairs")}>View all <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate}/></Card><Card className="stock-card"><div className="card-head"><div><h2>Branch alerts</h2><p>Items needing attention</p></div><span className="count-badge">{lowStock.length}</span></div>{lowStock.length === 0 ? <p className="muted">Nothing is at or below its reorder level.</p> : lowStock.slice(0, 4).map((product) => { const available = product.stockOnHand - product.reserved; return <div className="stock-row" key={product.id}><div className="product-mini"><Icon name="box"/></div><div><strong>{product.name}</strong><span>{product.sku}</span></div><div><strong className={available <= 0 ? "danger-text" : ""}>{available} left</strong><span>Min. {product.minStock}</span></div></div>; })}</Card></div>}
   </>;
 }
 

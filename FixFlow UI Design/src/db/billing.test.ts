@@ -46,6 +46,16 @@ async function repairToBill() {
   return db.repairs.changeStatus(job.id, 'waiting_for_approval', 'usr_tech_1')
 }
 
+/**
+ * Ordering is by `createdAt`, which has millisecond resolution. Two invoices
+ * raised back to back can land in the same millisecond, and then "newest first"
+ * has nothing to sort on. Yielding a real timer makes the assertion depend on
+ * the code rather than on how fast the machine happens to be. A real timer, not
+ * fake timers — faking the clock breaks the promise scheduling Dexie and
+ * IndexedDB rely on.
+ */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
+
 /** Rs. 15,000.00 total: 12,000 panel + 3,000 labour, tax off. */
 const bill = (repairId: string, over: Record<string, unknown> = {}) =>
   db.invoices.create({
@@ -339,7 +349,13 @@ describe('invoices.list', () => {
   it('returns newest first', async () => {
     const repair = await repairToBill()
     const first = await bill(repair.id)
+    await tick()
     const second = await bill(repair.id)
+
+    // If this ever fails the assertion below is meaningless: it would be
+    // asserting an order the data does not actually establish.
+    expect(first.createdAt < second.createdAt).toBe(true)
+
     const all = await db.invoices.list({ branchId: 'br_colombo' })
     expect(all[0].id).toBe(second.id)
     expect(all[1].id).toBe(first.id)

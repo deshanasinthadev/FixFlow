@@ -193,3 +193,168 @@ describe('availableUnits', () => {
     expect(availableUnits(product({ stockOnHand: 2, reserved: 5 }))).toBe(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Money, series and overdue (§1 dashboard, §18 profit)
+// ---------------------------------------------------------------------------
+
+import { computeMoneyFigures, computeSeries, countOverdueRepairs } from './figures'
+
+const invoice = (over: Record<string, unknown> = {}) => ({
+  repairId: 'fxr_1',
+  paidTotal: 5000_00,
+  createdAt: '2026-03-18T10:00:00.000',
+  ...over,
+})
+
+const expense = (over: Record<string, unknown> = {}) => ({
+  amount: 1000_00,
+  spentAt: '2026-03-18T00:00:00.000',
+  ...over,
+})
+
+describe('computeMoneyFigures', () => {
+  it('returns zeros rather than plausible numbers when there is no data', () => {
+    expect(computeMoneyFigures({ sales: [], invoices: [], expenses: [] }, NOW)).toEqual({
+      todaySales: 0, todayRepairIncome: 0, todayExpenses: 0, todayProfit: 0,
+    })
+  })
+
+  it('sums only sales dated today', () => {
+    const figures = computeMoneyFigures({
+      sales: [
+        sale({ createdAt: '2026-03-18T09:00:00.000', subtotal: 10000_00, discount: 0, total: 10000_00 }),
+        sale({ createdAt: '2026-03-17T09:00:00.000', subtotal: 99000_00, discount: 0, total: 99000_00 }),
+      ],
+      invoices: [], expenses: [],
+    }, NOW)
+    expect(figures.todaySales).toBe(10000_00)
+  })
+
+  it('counts repair income as what was paid, not what was billed', () => {
+    const figures = computeMoneyFigures({
+      sales: [],
+      invoices: [
+        invoice({ paidTotal: 3000_00 }),
+        // An invoice with nothing collected yet is a receivable, not income.
+        invoice({ paidTotal: 0 }),
+      ],
+      expenses: [],
+    }, NOW)
+    expect(figures.todayRepairIncome).toBe(3000_00)
+  })
+
+  it('ignores an invoice with no repair — that is a counter sale, not repair income', () => {
+    const figures = computeMoneyFigures({
+      sales: [], invoices: [invoice({ repairId: '' })], expenses: [],
+    }, NOW)
+    expect(figures.todayRepairIncome).toBe(0)
+  })
+
+  it('subtracts cost of goods and expenses from profit', () => {
+    const figures = computeMoneyFigures({
+      sales: [sale({
+        createdAt: '2026-03-18T09:00:00.000',
+        subtotal: 10000_00, discount: 0, total: 10000_00,
+        items: [{ id: 'i', productId: 'p', productName: 'x', quantity: 2, unitPrice: 5000_00, unitCost: 3000_00, lineTotal: 10000_00 }],
+      })],
+      invoices: [invoice({ paidTotal: 4000_00 })],
+      expenses: [expense({ amount: 1500_00 })],
+    }, NOW)
+    // 10,000 sales + 4,000 repair − 6,000 COGS − 1,500 expenses
+    expect(figures.todayProfit).toBe(6500_00)
+  })
+
+  it('does not treat sales revenue as profit', () => {
+    const figures = computeMoneyFigures({
+      sales: [sale({
+        createdAt: '2026-03-18T09:00:00.000',
+        subtotal: 10000_00, discount: 0, total: 10000_00,
+        items: [{ id: 'i', productId: 'p', productName: 'x', quantity: 1, unitPrice: 10000_00, unitCost: 10000_00, lineTotal: 10000_00 }],
+      })],
+      invoices: [], expenses: [],
+    }, NOW)
+    // Sold at cost: revenue of 10,000 must produce profit of zero.
+    expect(figures.todaySales).toBe(10000_00)
+    expect(figures.todayProfit).toBe(0)
+  })
+})
+
+describe('computeSeries', () => {
+  it('returns every bucket in the window, including empty ones', () => {
+    const series = computeSeries({ sales: [], invoices: [], expenses: [] }, 'day', 7, NOW)
+    expect(series).toHaveLength(7)
+    expect(series.every((p) => p.revenue === 0 && p.expenses === 0)).toBe(true)
+  })
+
+  it('is ordered oldest first so the chart reads left to right in time', () => {
+    const series = computeSeries({ sales: [], invoices: [], expenses: [] }, 'day', 7, NOW)
+    expect(series[6].key).toBe('2026-03-18')
+    expect(series[0].key).toBe('2026-03-12')
+  })
+
+  it('buckets a sale into its own day', () => {
+    const series = computeSeries({
+      sales: [sale({ createdAt: '2026-03-16T09:00:00.000', subtotal: 7000_00, discount: 0, total: 7000_00 })],
+      invoices: [], expenses: [],
+    }, 'day', 7, NOW)
+    expect(series.find((p) => p.key === '2026-03-16')?.revenue).toBe(7000_00)
+    expect(series.find((p) => p.key === '2026-03-18')?.revenue).toBe(0)
+  })
+
+  it('buckets by month when asked', () => {
+    const series = computeSeries({
+      sales: [
+        sale({ createdAt: '2026-03-18T09:00:00.000', subtotal: 5000_00, discount: 0, total: 5000_00 }),
+        sale({ createdAt: '2026-02-10T09:00:00.000', subtotal: 2000_00, discount: 0, total: 2000_00 }),
+      ],
+      invoices: [], expenses: [],
+    }, 'month', 3, NOW)
+    expect(series).toHaveLength(3)
+    expect(series.find((p) => p.key === '2026-03')?.revenue).toBe(5000_00)
+    expect(series.find((p) => p.key === '2026-02')?.revenue).toBe(2000_00)
+    expect(series.find((p) => p.key === '2026-01')?.revenue).toBe(0)
+  })
+
+  it('adds expenses to the same bucket as revenue', () => {
+    const series = computeSeries({
+      sales: [sale({ createdAt: '2026-03-18T09:00:00.000', subtotal: 5000_00, discount: 0, total: 5000_00 })],
+      invoices: [],
+      expenses: [expense({ amount: 800_00 })],
+    }, 'day', 7, NOW)
+    const today = series.find((p) => p.key === '2026-03-18')!
+    expect(today.revenue).toBe(5000_00)
+    expect(today.expenses).toBe(800_00)
+  })
+})
+
+describe('countOverdueRepairs', () => {
+  it('counts a job past its promised date that is still open', () => {
+    expect(countOverdueRepairs([
+      job({ expectedCompletion: '2026-03-10T00:00:00.000Z', status: 'repairing' }),
+    ], NOW)).toBe(1)
+  })
+
+  it('does not count a job still inside its promised date', () => {
+    expect(countOverdueRepairs([
+      job({ expectedCompletion: '2026-03-20T00:00:00.000Z', status: 'repairing' }),
+    ], NOW)).toBe(0)
+  })
+
+  it('does not count a job with no promised date', () => {
+    expect(countOverdueRepairs([job({ expectedCompletion: '', status: 'repairing' })], NOW)).toBe(0)
+  })
+
+  it('excludes delivered and cancelled jobs', () => {
+    expect(countOverdueRepairs([
+      job({ expectedCompletion: '2026-03-01T00:00:00.000Z', status: 'delivered' }),
+      job({ expectedCompletion: '2026-03-01T00:00:00.000Z', status: 'cancelled' }),
+    ], NOW)).toBe(0)
+  })
+
+  it('treats the promised date itself as not yet overdue', () => {
+    expect(countOverdueRepairs([
+      job({ expectedCompletion: '2026-03-18T00:00:00.000Z', status: 'repairing' }),
+    ], NOW)).toBe(0)
+  })
+})

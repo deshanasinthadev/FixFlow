@@ -71,6 +71,37 @@
    "partially paid" is deliberately amber rather than green, since money is
    still owed. */
 .badge.issued { background: #dbeafe; color: #1d4ed8; }
+
+/* A KPI tile that opens its page. It is a <button>, so it inherits the card
+   look rather than the browser's default button chrome. */
+.card-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: border-color var(--transition), transform var(--transition);
+}
+.card-link:hover { border-color: var(--primary); }
+.card-link:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Week / month switch above the income chart. */
+.chart-toggle { display: flex; gap: 4px; background: var(--surface2); border-radius: 8px; padding: 3px; }
+.chart-toggle button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.chart-toggle button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
 .badge.paid { background: #dcfce7; color: #15803d; }
 .badge.partially-paid { background: #fef3c7; color: #b45309; }.badge.in-progress{background:#dbeafe;color:#2563eb}.badge.completed{background:#d1fae5;color:#047857}.badge.delivered{background:#cffafe;color:#0e7490}.badge.cancelled{background:#fee2e2;color:#b91c1c}.badge.ai{background:#ede9fe;color:#6d28d9}.dark .badge{background:rgba(139,92,246,.14)}.priority{font-size:var(--fs-xs);padding-left:8px;position:relative}.priority:before{content:"";position:absolute;left:0;top:3px;width:4px;height:4px;background:#94a3b8;border-radius:50%}.priority.high:before,.priority.urgent:before{background:#f43f7a}.priority.urgent{color:#e11d48}.priority.high{color:#ea580c}.priority.normal{color:#2563eb}.priority.low{color:#64748b}.priority.normal:before{background:#3b82f6}.filter-card{padding:11px;display:flex;gap:8px;margin-bottom:14px}.filter-search{border:1px solid var(--border);background:var(--surface2);border-radius:8px;display:flex;align-items:center;gap:7px;padding:0 10px;flex:1;min-width:250px;color:var(--muted)}
 
