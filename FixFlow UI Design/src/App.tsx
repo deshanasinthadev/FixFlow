@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Icon, type IconName } from "./components/Icon";
 import { ProductsPage } from "./modules/products/ProductsPage";
+import { LOGIN_HASH, buildHash, readHash, writeHash } from "./app/routes";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
 type User = {
@@ -117,11 +118,10 @@ function App() {
   const allowedPages = [...navPages, ...extraPages];
   const scopedRepairs = user ? recordsFor(user) : [];
 
-  const routeFor = (to: string, activeUser = user) => {
-    if (!activeUser) return "/login";
-    const slug = to.toLowerCase().replaceAll(" ", "-");
-    return `/${activeUser.role.toLowerCase()}/${slug}`;
-  };
+  // §2 — hash-based routing. A hash never reaches the server, so reload and
+  // shared links work on any static host without a rewrite rule.
+  const routeFor = (to: string, activeUser = user) =>
+    activeUser ? buildHash(activeUser.role, to) : LOGIN_HASH;
   const navigate = (to: string) => {
     if (!user || ![...allowedPages, "Dashboard"].includes(to)) {
       to = "Dashboard";
@@ -129,36 +129,47 @@ function App() {
     setPage(to);
     setMobileNav(false);
     setProfileOpen(false);
-    window.history.pushState({ page: to }, "", routeFor(to));
+    writeHash(routeFor(to));
   };
   const login = (nextUser: User, remember: boolean) => {
     setUser(nextUser);
     setPage("Dashboard");
     if (remember) localStorage.setItem("fixflow-session", JSON.stringify(nextUser));
     else localStorage.removeItem("fixflow-session");
-    window.history.replaceState({ page: "Dashboard" }, "", routeFor("Dashboard", nextUser));
+    // Replace, so Back cannot land on the login route again.
+    writeHash(routeFor("Dashboard", nextUser), true);
   };
   const logout = () => {
     localStorage.removeItem("fixflow-session");
     setUser(null);
     setPage("Dashboard");
     setProfileOpen(false);
-    window.history.replaceState({}, "", "/login");
+    writeHash(LOGIN_HASH, true);
   };
 
   useEffect(() => {
-    const guardBrowserRoute = () => {
+    /**
+     * Reconciles the page state with the URL.
+     *
+     * A route the signed-in role is not allowed to see is redirected rather
+     * than rendered — typing `#/admin/audit-logs` into the address bar must
+     * not bypass the sidebar, because hiding a nav item is not access control.
+     */
+    const guardHashRoute = () => {
       if (!user) {
-        window.history.replaceState({}, "", "/login");
+        writeHash(LOGIN_HASH, true);
         return;
       }
-      const statePage = window.history.state?.page as string | undefined;
-      if (statePage && [...allowedPages, "Dashboard"].includes(statePage)) setPage(statePage);
-      else if (window.location.pathname !== routeFor(page)) window.history.replaceState({ page: "Dashboard" }, "", routeFor("Dashboard"));
+      const target = readHash();
+      if (target && target.role !== "login" && [...allowedPages, "Dashboard"].includes(target.page)) {
+        if (target.page !== page) setPage(target.page);
+        return;
+      }
+      writeHash(routeFor(page), true);
     };
-    guardBrowserRoute();
-    window.addEventListener("popstate", guardBrowserRoute);
-    return () => window.removeEventListener("popstate", guardBrowserRoute);
+    guardHashRoute();
+    window.addEventListener("hashchange", guardHashRoute);
+    return () => window.removeEventListener("hashchange", guardHashRoute);
   }, [user, allowedPages.join("|")]);
 
   useEffect(() => {
