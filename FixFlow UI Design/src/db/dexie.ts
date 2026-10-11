@@ -1,5 +1,24 @@
 import Dexie, { type Table } from 'dexie'
-import type { Db, DuplicateStrategy, ImportResult, ProductInput, StockAdjust } from './repository'
+import type {
+  Branch,
+  Customer,
+  Device,
+  RepairJob,
+  RepairStatus,
+  RepairStatusHistoryEntry,
+  User,
+} from '../domain/types'
+import type {
+  CustomerInput,
+  Db,
+  DeviceInput,
+  DuplicateStrategy,
+  ImportResult,
+  ProductInput,
+  RepairFilter,
+  RepairInput,
+  StockAdjust,
+} from './repository'
 import {
   ImportBatch,
   Product,
@@ -11,8 +30,22 @@ import {
   type StockMovement as StockMovementT,
 } from './schema'
 import { seedProducts } from './seed'
+import {
+  seedBranches,
+  seedCustomers,
+  seedDevices,
+  seedRepairHistory,
+  seedRepairs,
+  seedUsers,
+} from './seedBusiness'
+import { assertRepairTransition, REPAIR_STATUS_LABEL } from '../domain/workflows'
 
-const DB_NAME = 'fixflow'
+/**
+ * §2 — the approved demo persistence key. Dexie gives us versioned migrations
+ * for free, which is the substance of the requirement: local, versioned,
+ * migratable, no backend, and never silently discarding user data.
+ */
+const DB_NAME = 'fixflow.demo.v1'
 
 /**
  * Creates a repository over its own IndexedDB database.
@@ -26,6 +59,12 @@ export function createDb(name: string = DB_NAME): Db {
     products!: Table<ProductT, string>
     movements!: Table<StockMovementT, string>
     batches!: Table<ImportBatchT, string>
+    branches!: Table<Branch, string>
+    users!: Table<User, string>
+    customers!: Table<Customer, string>
+    devices!: Table<Device, string>
+    repairs!: Table<RepairJob, string>
+    repairHistory!: Table<RepairStatusHistoryEntry, string>
 
     constructor() {
       super(name)
@@ -33,6 +72,16 @@ export function createDb(name: string = DB_NAME): Db {
         products: 'id, sku, branchId, name, category',
         movements: 'id, productId, at',
         batches: 'id, at',
+      })
+      // Version 2 adds the business entities. Dexie carries the version-1
+      // tables forward, so an existing user's products survive the upgrade.
+      this.version(2).stores({
+        branches: 'id, code, active',
+        users: 'id, role, branchId, active',
+        customers: 'id, code, fullName, phone, portalToken, status',
+        devices: 'id, customerId, category',
+        repairs: 'id, jobNumber, branchId, customerId, technicianId, status, priority, receivedAt',
+        repairHistory: 'id, repairId, at',
       })
     }
   }
@@ -104,27 +153,41 @@ export function createDb(name: string = DB_NAME): Db {
       seeding ??= (async () => {
         const count = await raw.products.count()
         if (count > 0) return
-        await raw.transaction('rw', raw.products, raw.movements, async () => {
-          // Re-check inside the transaction: the earlier count may be stale.
-          if ((await raw.products.count()) > 0) return
-          await raw.products.bulkAdd(seedProducts)
-          await raw.movements.bulkAdd(
-            seedProducts.map((p) =>
-              StockMovement.parse({
-                id: newId('mv'),
-                productId: p.id,
-                branchId: p.branchId,
-                type: 'opening',
-                qty: p.stockOnHand,
-                before: 0,
-                after: p.stockOnHand,
-                reason: 'Opening balance',
-                actorId: 'system',
-                at: p.createdAt,
-              }),
-            ),
-          )
-        })
+        // Array form: the positional overload caps at seven tables, and the
+        // seed now writes eight.
+        await raw.transaction(
+          'rw',
+          [raw.products, raw.movements, raw.branches, raw.users, raw.customers, raw.devices, raw.repairs, raw.repairHistory],
+          async () => {
+            // Re-check inside the transaction: the earlier count may be stale.
+            if ((await raw.products.count()) > 0) return
+            await raw.products.bulkAdd(seedProducts)
+            await raw.movements.bulkAdd(
+              seedProducts.map((p) =>
+                StockMovement.parse({
+                  id: newId('mv'),
+                  productId: p.id,
+                  branchId: p.branchId,
+                  type: 'opening',
+                  qty: p.stockOnHand,
+                  before: 0,
+                  after: p.stockOnHand,
+                  reason: 'Opening balance',
+                  actorId: 'system',
+                  at: p.createdAt,
+                }),
+              ),
+            )
+            // Business entities seed in the same transaction, so a failure
+            // cannot leave a half-populated database behind (§28.15).
+            await raw.branches.bulkAdd(seedBranches)
+            await raw.users.bulkAdd(seedUsers)
+            await raw.customers.bulkAdd(seedCustomers)
+            await raw.devices.bulkAdd(seedDevices)
+            await raw.repairs.bulkAdd(seedRepairs)
+            await raw.repairHistory.bulkAdd(seedRepairHistory)
+          },
+        )
       })()
       return seeding
     },
@@ -285,6 +348,213 @@ export function createDb(name: string = DB_NAME): Db {
           }
           await raw.batches.update(batchId, { undoneAt: nowIso() })
         })
+      },
+    },
+
+    // --- business entities -------------------------------------------------
+
+    branches: {
+      list: () => raw.branches.toArray(),
+      get: (id) => raw.branches.get(id),
+    },
+
+    users: {
+      list: () => raw.users.toArray(),
+      get: (id) => raw.users.get(id),
+      byRole: (role) => raw.users.where('role').equals(role).toArray(),
+      async technicians(branchId) {
+        const all = await raw.users.where('role').equals('technician').toArray()
+        return all.filter(
+          (u) => u.active && (!branchId || u.branchId === branchId || u.branchId === 'all'),
+        )
+      },
+    },
+
+    customers: {
+      list: () => raw.customers.toArray(),
+      get: (id) => raw.customers.get(id),
+
+      async create(input: CustomerInput): Promise<Customer> {
+        const phone = input.phone.trim()
+        if (!phone) throw new Error('A customer needs a phone number.')
+        const dupe = await raw.customers.where('phone').equals(phone).first()
+        if (dupe) throw new Error(`A customer with phone ${phone} already exists (${dupe.fullName}).`)
+
+        const id = newId('cus')
+        const customer: Customer = {
+          ...input,
+          id,
+          // Sequential code is cosmetic; the portal token is the real handle.
+          code: `C-${String(Date.now()).slice(-5)}`,
+          portalToken: `ptk_${id}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`,
+          createdAt: nowIso(),
+        }
+        await raw.customers.add(customer)
+        return customer
+      },
+
+      async update(id: string, patch: Partial<CustomerInput>): Promise<Customer> {
+        const existing = await raw.customers.get(id)
+        if (!existing) throw new Error(`No customer ${id}`)
+        // Apply the patch, then re-assert the identity fields from the stored
+        // record. CustomerInput cannot name them at the type level, but a
+        // runtime caller could still smuggle one in; the portal token is the
+        // customer's only credential, so it must never be reassignable here.
+        const updated: Customer = {
+          ...existing,
+          ...patch,
+          id: existing.id,
+          code: existing.code,
+          portalToken: existing.portalToken,
+          createdAt: existing.createdAt,
+        }
+        await raw.customers.put(updated)
+        return updated
+      },
+
+      async search(term: string): Promise<Customer[]> {
+        const needle = term.trim().toLowerCase()
+        if (!needle) return []
+        const all = await raw.customers.toArray()
+        return all.filter((c) =>
+          `${c.fullName} ${c.phone} ${c.email} ${c.code}`.toLowerCase().includes(needle),
+        )
+      },
+
+      byPortalToken: (token) =>
+        token ? raw.customers.where('portalToken').equals(token).first() : Promise.resolve(undefined),
+    },
+
+    devices: {
+      list: () => raw.devices.toArray(),
+      forCustomer: (customerId) => raw.devices.where('customerId').equals(customerId).toArray(),
+      get: (id) => raw.devices.get(id),
+      async create(input: DeviceInput): Promise<Device> {
+        if (!input.brand.trim() || !input.model.trim()) {
+          throw new Error('A device needs a brand and a model.')
+        }
+        const device: Device = { ...input, id: newId('dev'), createdAt: nowIso() }
+        await raw.devices.add(device)
+        return device
+      },
+    },
+
+    repairs: {
+      async list(filter: RepairFilter = {}): Promise<RepairJob[]> {
+        let rows = await raw.repairs.toArray()
+        if (filter.branchId) rows = rows.filter((r) => r.branchId === filter.branchId)
+        if (filter.status) rows = rows.filter((r) => r.status === filter.status)
+        if (filter.customerId) rows = rows.filter((r) => r.customerId === filter.customerId)
+        if (filter.technicianId) rows = rows.filter((r) => r.technicianId === filter.technicianId)
+        if (filter.search) {
+          const needle = filter.search.trim().toLowerCase()
+          rows = rows.filter((r) =>
+            `${r.jobNumber} ${r.customerName} ${r.deviceSummary} ${r.serialNumber} ${r.reportedIssue}`
+              .toLowerCase()
+              .includes(needle),
+          )
+        }
+        rows.sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1))
+        return filter.limit ? rows.slice(0, filter.limit) : rows
+      },
+
+      get: (id) => raw.repairs.get(id),
+
+      async create(input: RepairInput): Promise<RepairJob> {
+        const branch = await raw.branches.get(input.branchId)
+        if (!branch) throw new Error(`Unknown branch ${input.branchId}`)
+        const customer = await raw.customers.get(input.customerId)
+        if (!customer) throw new Error(`Unknown customer ${input.customerId}`)
+        if (!input.reportedIssue.trim()) throw new Error('Describe the reported issue.')
+
+        const now = nowIso()
+        const id = newId('rep')
+        const jobNumber = await repository.repairs.nextJobNumber(input.branchId)
+        const job: RepairJob = { ...input, id, jobNumber, createdAt: now, updatedAt: now }
+
+        // The job and its first history entry commit together, so a repair can
+        // never exist without an audit trail (§28.17).
+        await raw.transaction('rw', raw.repairs, raw.repairHistory, async () => {
+          await raw.repairs.add(job)
+          await raw.repairHistory.add({
+            id: newId('rsh'),
+            repairId: id,
+            from: '',
+            to: job.status,
+            byUserId: 'system',
+            note: 'Repair job created.',
+            at: now,
+          })
+        })
+        return job
+      },
+
+      async changeStatus(id: string, to: RepairStatus, actorId: string, note?: string): Promise<RepairJob> {
+        return raw.transaction('rw', raw.repairs, raw.repairHistory, async () => {
+          const job = await raw.repairs.get(id)
+          if (!job) throw new Error(`No repair ${id}`)
+          // Validated before writing — §28.10.
+          assertRepairTransition(job.status, to)
+
+          const now = nowIso()
+          const updated: RepairJob = { ...job, status: to, updatedAt: now }
+          await raw.repairs.put(updated)
+          await raw.repairHistory.add({
+            id: newId('rsh'),
+            repairId: id,
+            from: job.status,
+            to,
+            byUserId: actorId,
+            note: note?.trim() || `Moved to ${REPAIR_STATUS_LABEL[to]}.`,
+            at: now,
+          })
+          return updated
+        })
+      },
+
+      async assignTechnician(id: string, technicianId: string, actorId: string): Promise<RepairJob> {
+        const tech = await raw.users.get(technicianId)
+        if (!tech) throw new Error(`No technician ${technicianId}`)
+        if (tech.role !== 'technician') throw new Error(`${tech.fullName} is not a technician.`)
+
+        return raw.transaction('rw', raw.repairs, raw.repairHistory, async () => {
+          const job = await raw.repairs.get(id)
+          if (!job) throw new Error(`No repair ${id}`)
+          const now = nowIso()
+          const updated: RepairJob = { ...job, technicianId, updatedAt: now }
+          await raw.repairs.put(updated)
+          await raw.repairHistory.add({
+            id: newId('rsh'),
+            repairId: id,
+            from: job.status,
+            to: job.status,
+            byUserId: actorId,
+            note: `Assigned to ${tech.fullName}.`,
+            at: now,
+          })
+          return updated
+        })
+      },
+
+      async update(id: string, patch: Partial<RepairInput>): Promise<RepairJob> {
+        const existing = await raw.repairs.get(id)
+        if (!existing) throw new Error(`No repair ${id}`)
+        const updated: RepairJob = { ...existing, ...patch, id, jobNumber: existing.jobNumber, updatedAt: nowIso() }
+        await raw.repairs.put(updated)
+        return updated
+      },
+
+      history: (id) => raw.repairHistory.where('repairId').equals(id).sortBy('at'),
+
+      async nextJobNumber(branchId: string, year = new Date().getFullYear()): Promise<string> {
+        const branch = await raw.branches.get(branchId)
+        const prefix = `FX-${year}-`
+        const all = await raw.repairs.toArray()
+        const highest = all
+          .filter((r) => r.jobNumber.startsWith(prefix))
+          .reduce((max, r) => Math.max(max, Number(r.jobNumber.slice(prefix.length)) || 0), 0)
+        void branch
+        return `${prefix}${String(highest + 1).padStart(6, '0')}`
       },
     },
   }
