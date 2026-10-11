@@ -11,6 +11,7 @@ import { ExpensesPage } from "./modules/finance/ExpensesPage";
 import { ReportsPage } from "./modules/finance/ReportsPage";
 import { WarrantyPage } from "./modules/warranty/WarrantyPage";
 import { AuditLogPage } from "./modules/audit/AuditLogPage";
+import { PurchasingPage } from "./modules/purchasing/PurchasingPage";
 import { can, canCustomerAccess, requirePermission } from "./domain/permissions";
 import { permissionForPage } from "./domain/pageAccess";
 import { deriveNotifications } from "./modules/notifications/derive";
@@ -420,12 +421,13 @@ function App() {
           {pageAllowed && (page === "Reports" || page === "Finance") && <ReportsPage branchId={user.branchId}/>}
           {pageAllowed && (page === "Warranty" || page === "Warranty Claims") && <WarrantyPage branchId={user.branchId} actorId={user.id}/>}
           {pageAllowed && page === "Audit Log" && <AuditLogPage branchId={user.branchId} canSeeAll={user.role === "Admin"}/>}
+          {pageAllowed && (page === "Suppliers" || page === "Purchase Orders") && <PurchasingPage branchId={user.branchId} actorId={user.id}/>}
           {pageAllowed && page === "Cash Register" && <CashRegisterPage branchId={user.branchId} cashierId={user.id}/>}
           {pageAllowed && (page === "Sales" || page === "Refunds") && <SalesPage branchId={user.branchId} actorId={user.id}/>}
           {pageAllowed && page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
           {pageAllowed && (page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
           {pageAllowed && (page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis/>}
-          {pageAllowed && !["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds", "Estimates", "Invoices", "Receivables", "Payments", "Stock Adjustments", "Customers", "Expenses", "Reports", "Finance", "Warranty", "Warranty Claims", "Audit Log"].includes(page) && <ModulePreview page={page} user={user} source={{ repairs: scopedJobs, products: scopedProducts }}/>}
+          {pageAllowed && !["Dashboard", "Repairs", "My Repairs", "Repair Board", "New Repair", "Repair Details", "My Repair Details", "POS", "Inventory", "AI Diagnosis", "Diagnosis", "Cash Register", "Sales", "Refunds", "Estimates", "Invoices", "Receivables", "Payments", "Stock Adjustments", "Customers", "Expenses", "Reports", "Finance", "Warranty", "Warranty Claims", "Audit Log", "Suppliers", "Purchase Orders"].includes(page) && <ModulePreview page={page} user={user} source={{ repairs: scopedJobs, products: scopedProducts }}/>}
         </main>
       </div>
 
