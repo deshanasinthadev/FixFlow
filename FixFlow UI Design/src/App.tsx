@@ -7,9 +7,9 @@ import { computeDocument } from "./domain/calculations";
 import { formatLKR } from "./lib/format";
 import { nextRepairStatuses, mayPerformRepairTransition } from "./domain/workflows";
 import { computeDashboardFigures, type DashboardFigures } from "./modules/dashboard/figures";
-import type { RepairJob, RepairStatus } from "./domain/types";
+import type { RepairJob, RepairStatus, Sale } from "./domain/types";
 import type { Product } from "./db/schema";
-import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole, boardColumns } from "./modules/repairs/repairView";
+import { scopeRepairsFor, technicianNames, toRepairRows, type RepairRow, STATUS_LABEL, PRIORITY_LABEL, formatEta, toDomainRole, boardColumns, customerProgress } from "./modules/repairs/repairView";
 
 type Role = "Admin" | "Manager" | "Technician" | "Cashier" | "Customer";
 type User = {
@@ -138,16 +138,20 @@ function App() {
     [scopedJobs, repairData],
   );
   /** §6 — every dashboard figure derives from saved records. */
-  const figures = useMemo(() => {
+  const scopedSales = useMemo<Sale[]>(() => {
+    const all = repairData?.sales ?? [];
     const branchId = user?.role === "Admin" ? "" : user?.branchId ?? "";
-    const scoped = <T extends { branchId: string }>(rows: T[]) =>
-      branchId ? rows.filter((r) => r.branchId === branchId) : rows;
-    return computeDashboardFigures({
-      repairs: scopedJobs,
-      sales: scoped(repairData?.sales ?? []),
-      products: scoped(repairData?.products ?? []),
-    });
-  }, [scopedJobs, repairData, user]);
+    return branchId ? all.filter((sale) => sale.branchId === branchId) : all;
+  }, [repairData, user]);
+  const scopedProducts = useMemo<Product[]>(() => {
+    const all = repairData?.products ?? [];
+    const branchId = user?.role === "Admin" ? "" : user?.branchId ?? "";
+    return branchId ? all.filter((product) => product.branchId === branchId) : all;
+  }, [repairData, user]);
+  const figures = useMemo(
+    () => computeDashboardFigures({ repairs: scopedJobs, sales: scopedSales, products: scopedProducts }),
+    [scopedJobs, scopedSales, scopedProducts],
+  );
 
   // §2 — hash-based routing. A hash never reaches the server, so reload and
   // shared links work on any static host without a rewrite rule.
@@ -274,12 +278,12 @@ function App() {
             </div>
           </div>
 
-          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures}/> : <RoleDashboard user={user} data={scopedRepairs} navigate={navigate}/>)}
+          {page === "Dashboard" && (user.role === "Admin" ? <Dashboard navigate={navigate} data={scopedRepairs} figures={figures}/> : <RoleDashboard user={user} data={scopedRepairs} navigate={navigate} figures={figures} sales={scopedSales}/>)}
           {(page === "Repairs" || page === "My Repairs") && (isCustomer ? <CustomerRepairs data={scopedRepairs} navigate={navigate}/> : <Repairs navigate={navigate} data={scopedRepairs} technician={user.role === "Technician"}/>)}
           {page === "Repair Board" && <RepairBoard data={scopedRepairs}/>}
           {page === "New Repair" && <NewRepair navigate={navigate} actor={user}/>}
           {page === "Repair Details" && <RepairDetails jobNumber={param} technician={user.role === "Technician"} actor={user} navigate={navigate}/>}
-          {page === "My Repair Details" && <CustomerRepairDetails data={scopedRepairs}/>}
+          {page === "My Repair Details" && <CustomerRepairDetails jobNumber={param} jobs={scopedJobs}/>}
           {page === "POS" && <POS cart={cart} setCart={setCart} actor={user}/>}
           {(page === "Inventory" || page === "Products") && <ProductsPage branchId={user.branchId}/>}
           {(page === "AI Diagnosis" || page === "Diagnosis") && <AIDiagnosis analyzed={analyzed} setAnalyzed={setAnalyzed}/>}
@@ -433,7 +437,7 @@ function Dashboard({ navigate, data, figures }: { navigate: (p: string) => void;
   </>;
 }
 
-function RoleDashboard({ user, data, navigate }: { user: User; data: RepairRow[]; navigate: (page: string) => void }) {
+function RoleDashboard({ user, data, navigate, figures, sales }: { user: User; data: RepairRow[]; navigate: (page: string, param?: string) => void; figures: DashboardFigures; sales: Sale[] }) {
   if (user.role === "Customer") {
     const repair = data[0];
     return <div className="customer-dashboard">
@@ -454,12 +458,12 @@ function RoleDashboard({ user, data, navigate }: { user: User; data: RepairRow[]
 
   const roleCards: Record<Exclude<Role, "Admin" | "Customer">, Array<[string, string, IconName, string, string]>> = {
     Manager: [
-      ["Branch Repairs", String(data.length), "tool", "purple", "Colombo 03 only"],
-      ["Pending Repairs", String(data.filter((r) => r.status.includes("Awaiting")).length), "clock", "pink", "Needs attention"],
-      ["Ready for Pickup", String(data.filter((r) => r.status === "Ready for Pickup").length), "check", "cyan", "Branch queue"],
-      ["Branch Sales", "Rs. 142,800", "sale", "blue", "+8.4% today"],
-      ["Inventory Alerts", "6", "alert", "amber", "2 critical"],
-      ["Outstanding", "Rs. 84,500", "wallet", "slate", "Branch invoices"],
+      ["Branch Repairs", String(data.length), "tool", "purple", "Your branch"],
+      ["Awaiting Approval", String(figures.awaitingApproval), "clock", "pink", "Needs a decision"],
+      ["Ready for Pickup", String(figures.readyForPickup), "check", "cyan", "Branch queue"],
+      ["Sales Today", formatLKR(figures.todaySales), "sale", "blue", `${figures.todaySaleCount} sales`],
+      ["Inventory Alerts", String(figures.lowStockItems), "alert", "amber", `${figures.criticalStockItems} critical`],
+      ["Unassigned", String(figures.unassignedRepairs), "users", "slate", "Needs a technician"],
     ],
     Technician: [
       ["My Assigned Repairs", String(data.length), "tool", "purple", "Assigned to you"],
@@ -470,12 +474,10 @@ function RoleDashboard({ user, data, navigate }: { user: User; data: RepairRow[]
       ["Ready", String(data.filter((r) => r.status === "Ready for Pickup").length), "shield", "slate", "Completed by you"],
     ],
     Cashier: [
-      ["Today's Sales", "Rs. 86,400", "sale", "blue", "Colombo 03"],
-      ["Today's Payments", "24", "card", "purple", "Your branch"],
-      ["Open Register", "Rs. 92,500", "cash", "cyan", "Started 8:45 AM"],
-      ["Pending Payments", "7", "clock", "pink", "Branch invoices"],
-      ["Ready for Pickup", String(data.filter((r) => r.status === "Ready for Pickup").length), "check", "blue", "Paid delivery queue"],
-      ["Refund Requests", "1", "transfer", "amber", "Approval required"],
+      ["Today's Sales", formatLKR(figures.todaySales), "sale", "blue", `${figures.todaySaleCount} sales`],
+      ["Active Repairs", String(figures.activeRepairs), "tool", "purple", "In the shop"],
+      ["Ready for Pickup", String(figures.readyForPickup), "check", "blue", "Paid delivery queue"],
+      ["Low Stock", String(figures.lowStockItems), "alert", "amber", `${figures.criticalStockItems} critical`],
     ],
   };
   const cards = roleCards[user.role as keyof typeof roleCards];
@@ -483,25 +485,42 @@ function RoleDashboard({ user, data, navigate }: { user: User; data: RepairRow[]
     <div className="role-scope"><Icon name={user.role === "Manager" ? "branch" : user.role === "Technician" ? "tool" : "cash"}/><span><strong>{user.role} workspace</strong>Data is restricted to {user.role === "Technician" ? "repairs assigned to you" : `${user.branch} branch`}.</span><Badge tone="in-stock">Protected</Badge></div>
     <div className="kpi-grid">{cards.map(([label, value, icon, tone, note]) => <Card className="kpi" key={label}><div className={`kpi-icon ${tone}`}><Icon name={icon}/></div><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div><div className="kpi-change positive">{note}</div></Card>)}</div>
     {user.role === "Technician" ? <Card className="table-card role-table"><div className="card-head table-title"><div><h2>My assigned repairs</h2><p>Only work assigned directly to your technician account.</p></div><Button kind="ghost" onClick={() => navigate("My Repairs")}>View workspace <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate} showFinancial={false}/></Card> :
-      user.role === "Cashier" ? <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Recent branch transactions</h2><p>Payments processed at your register</p></div><Button kind="ghost" onClick={() => navigate("POS")}>Open POS <Icon name="arrow" size={14}/></Button></div><TransactionList/></Card><Card className="register-card"><div className="card-head"><div><h2>Cash register</h2><p>Register #CR-CO3-04</p></div><Badge tone="in-stock">Open</Badge></div><div className="register-total"><span>Expected cash</span><strong>Rs. 92,500</strong><small>Opening float Rs. 15,000</small></div><Button kind="secondary" onClick={() => navigate("Cash Register")}>View register</Button></Card></div> :
+      user.role === "Cashier" ? <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Recent branch transactions</h2><p>Payments processed at your register</p></div><Button kind="ghost" onClick={() => navigate("POS")}>Open POS <Icon name="arrow" size={14}/></Button></div><TransactionList sales={sales}/></Card></div> :
       <div className="bottom-grid"><Card className="recent"><div className="card-head table-title"><div><h2>Branch repair activity</h2><p>Authorized Colombo 03 records only</p></div><Button kind="ghost" onClick={() => navigate("Repairs")}>View all <Icon name="arrow" size={14}/></Button></div><RepairTable compact data={data} navigate={navigate}/></Card><Card className="stock-card"><div className="card-head"><div><h2>Branch alerts</h2><p>Items needing attention</p></div><span className="count-badge">6</span></div>{products.slice(0,4).map((product, index) => <div className="stock-row" key={product.name}><div className="product-mini"><Icon name={product.icon}/></div><div><strong>{product.name}</strong><span>{product.sku}</span></div><div><strong className={index < 2 ? "danger-text" : ""}>{index + 2} left</strong><span>Colombo 03</span></div></div>)}</Card></div>}
   </>;
 }
 
-function TransactionList() {
-  return <div className="transaction-list">{[["INV-2026-1024","Nimal Perera","Cash","Rs. 18,500"],["POS-2026-8842","Walk-in customer","Card","Rs. 6,500"],["INV-2026-1021","Amaya Fernando","Bank","Rs. 42,000"]].map(([id, customer, method, amount]) => <div key={id}><div className="product-mini"><Icon name="receipt"/></div><div><strong>{id}</strong><span>{customer} · {method}</span></div><strong>{amount}</strong></div>)}</div>;
+const PAYMENT_LABEL: Record<string, string> = { cash: "Cash", card: "Card", bank_transfer: "Bank", other: "Other" };
+
+function TransactionList({ sales }: { sales: Sale[] }) {
+  const recent = sales.slice(0, 5);
+  if (recent.length === 0) {
+    return <div className="transaction-list"><p className="muted">No sales recorded yet.</p></div>;
+  }
+  return <div className="transaction-list">{recent.map((sale) => <div key={sale.id}><div className="product-mini"><Icon name="receipt"/></div><div><strong>{sale.receiptNumber}</strong><span>{sale.customerName || "Walk-in customer"} · {PAYMENT_LABEL[sale.paymentMethod] ?? sale.paymentMethod}</span></div><strong>{formatLKR(sale.total)}</strong></div>)}</div>;
 }
 
-function CustomerRepairs({ data, navigate }: { data: RepairRow[]; navigate: (page: string) => void }) {
-  return <div className="portal-repairs">{data.map((repair) => <Card className="portal-repair-card" key={repair.id}><div className="device-icon"><Icon name="laptop" size={24}/></div><div className="portal-repair-main"><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Estimated completion: {repair.eta}</p></div><Button kind="secondary" onClick={() => navigate("My Repair Details")}>Track repair</Button></Card>)}</div>;
+function CustomerRepairs({ data, navigate }: { data: RepairRow[]; navigate: (page: string, param?: string) => void }) {
+  if (data.length === 0) {
+    return <Card className="empty-module"><Icon name="tool" size={32}/><h2>No repairs yet</h2><p>Repairs booked against this account will appear here.</p></Card>;
+  }
+  return <div className="portal-repairs">{data.map((repair) => <Card className="portal-repair-card" key={repair.id}><div className="device-icon"><Icon name="laptop" size={24}/></div><div className="portal-repair-main"><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Estimated completion: {repair.eta}</p></div><Button kind="secondary" onClick={() => navigate("My Repair Details", repair.id)}>Track repair</Button></Card>)}</div>;
 }
 
-function CustomerRepairDetails({ data }: { data: RepairRow[] }) {
-  const repair = data[0];
+function CustomerRepairDetails({ jobNumber, jobs }: { jobNumber: string; jobs: RepairJob[] }) {
+  // The route parameter decides which repair this is; falling back to the
+  // first only covers a customer who lands here without picking one.
+  const repair = jobs.find((j) => j.jobNumber === jobNumber) ?? jobs[0];
   if (!repair) return <Card className="empty-module"><Icon name="tool" size={32}/><h2>No repair found</h2><p>This account has no active repair records.</p></Card>;
-  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.id}</span><Badge>{repair.status}</Badge></div><h2>{repair.device}</h2><p>Your repair · Colombo 03</p></div></div><div className="repair-facts"><div><span>Estimated completion</span><strong>{repair.eta}</strong></div><div><span>Approved estimate</span><strong>{repair.amount}</strong></div></div></Card><div className="customer-detail-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Your repair journey</h2><p>Simple, customer-friendly progress updates.</p></div></div><div className="portal-progress horizontal">{["Received","Diagnosing","Repairing","Testing","Ready","Delivered"].map((item,index)=><div className={index<3?"complete":index===3?"current":""} key={item}><span>{index<3?<Icon name="check" size={14}/>:index+1}</span><strong>{item}</strong></div>)}</div><div className="customer-update"><Icon name="bell"/><div><strong>Your repair is progressing</strong><p>Our team has completed the repair work. Your device will now move to quality testing.</p><span>Updated today at 11:42 AM</span></div></div></Card><Card className="portal-actions"><h2>Repair summary</h2><div className="info-list"><div><span>Issue reported</span><strong>Overheats and shuts down</strong></div><div><span>Approved work</span><strong>Cooling service and thermal compound replacement</strong></div><div><span>Payment status</span><strong>Payment due on pickup</strong></div><div><span>Warranty</span><strong>90 days after delivery</strong></div></div><Button>Contact support</Button></Card></div></>;
-}
 
+  const progress = customerProgress(repair.status);
+  return <><Card className="repair-hero"><div className="repair-device"><div className="device-icon"><Icon name="laptop" size={25}/></div><div><div><span>{repair.jobNumber}</span><Badge>{STATUS_LABEL[repair.status]}</Badge></div><h2>{repair.deviceSummary}</h2><p>Your repair</p></div></div><div className="repair-facts"><div><span>Estimated completion</span><strong>{repair.expectedCompletion ? formatEta(repair) : "Not set yet"}</strong></div><div><span>Work recorded so far</span><strong>{formatLKR(repair.labourCost)}</strong></div></div></Card><div className="customer-detail-grid"><Card className="portal-timeline-card"><div className="card-head"><div><h2>Your repair journey</h2><p>Simple, customer-friendly progress updates.</p></div></div>
+    {progress.cancelled
+      ? <p className="danger-text" role="status">This repair was cancelled. Please contact the branch if that is unexpected.</p>
+      : <div className="portal-progress horizontal">{progress.steps.map((step, index) => <div className={index < progress.current ? "complete" : index === progress.current ? "current" : ""} key={step}><span>{index < progress.current ? <Icon name="check" size={14}/> : index + 1}</span><strong>{step}</strong></div>)}</div>}
+  </Card></div>
+  </>;
+}
 function Repairs({ navigate, data, technician = false }: { navigate: (p: string) => void; data: RepairRow[]; technician?: boolean }) {
   return <>
     <Card className="filter-card">

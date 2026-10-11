@@ -2,7 +2,7 @@ import { mayPerformRepairTransition } from '../../domain/workflows'
 import { describe, expect, it } from 'vitest'
 import type { RepairJob, RepairStatus, User } from '../../domain/types'
 import { REPAIR_STATUSES } from '../../domain/types'
-import { PRIORITY_LABEL, STATUS_LABEL, countRepairs, formatEta, scopeRepairsFor, statusBadgeTone, technicianNames, toRepairRow, toRepairRows, toDomainRole, boardColumns, type RepairRow } from './repairView'
+import { PRIORITY_LABEL, STATUS_LABEL, countRepairs, formatEta, scopeRepairsFor, statusBadgeTone, technicianNames, toRepairRow, toRepairRows, toDomainRole, boardColumns, customerProgress, type RepairRow } from './repairView'
 
 /**
  * The adapter between persisted RepairJob records and the row shape the
@@ -337,5 +337,46 @@ describe('boardColumns', () => {
     const rows = [row('FX-1', 'Received'), row('FX-2', 'Testing'), row('FX-3', 'Testing')]
     const total = boardColumns(rows).reduce((sum, c) => sum + c.rows.length, 0)
     expect(total).toBe(3)
+  })
+})
+
+describe('customerProgress', () => {
+  it('shows five customer-facing steps', () => {
+    expect(customerProgress('received').steps).toHaveLength(5)
+  })
+
+  it('collapses internal statuses onto the customer view', () => {
+    expect(customerProgress('waiting_for_approval').current).toBe(1)
+    expect(customerProgress('waiting_for_parts').current).toBe(1)
+    expect(customerProgress('approved').current).toBe(2)
+    expect(customerProgress('testing').current).toBe(2)
+    expect(customerProgress('completed').current).toBe(3)
+    expect(customerProgress('ready_for_collection').current).toBe(3)
+  })
+
+  it('advances monotonically through the workflow', () => {
+    const order: RepairStatus[] = ['received', 'diagnosing', 'repairing', 'completed', 'delivered']
+    const positions = order.map((s) => customerProgress(s).current)
+    for (let i = 1; i < positions.length; i += 1) {
+      expect(positions[i]).toBeGreaterThan(positions[i - 1])
+    }
+  })
+
+  it('reports a cancelled repair as cancelled, not as step zero', () => {
+    const result = customerProgress('cancelled')
+    expect(result.cancelled).toBe(true)
+    expect(result.current).toBe(-1)
+  })
+
+  it('never maps an unmapped status onto a plausible-looking step', () => {
+    expect(() => customerProgress('invented' as RepairStatus)).toThrow(/no customer-facing step/)
+  })
+
+  it('covers every status the domain defines', () => {
+    // If a new status is added upstream, this fails loudly instead of the
+    // portal quietly showing the wrong progress.
+    for (const status of Object.keys(STATUS_LABEL) as RepairStatus[]) {
+      expect(() => customerProgress(status)).not.toThrow()
+    }
   })
 })

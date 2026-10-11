@@ -225,3 +225,39 @@ export const boardColumns = (rows: RepairRow[]): { label: string; rows: RepairRo
 
 /** Total cards, so the board can show a count that matches what it renders. */
 export const boardTotal = (rows: RepairRow[]): number => rows.length
+
+/**
+ * The customer portal shows five steps, not eleven (§20). Internal statuses
+ * collapse onto them so the customer sees "Repairing" rather than "Approved",
+ * "Repairing" and "Testing" separately.
+ *
+ * Cancelled is reported on its own: it is not a position on the line, and
+ * rendering it as step 0 would tell a customer their cancelled repair had only
+ * just been received.
+ */
+export const CUSTOMER_STEPS = ['Received', 'Diagnosing', 'Repairing', 'Ready for Pickup', 'Delivered'] as const
+
+export const customerProgress = (
+  status: RepairStatus,
+): { steps: readonly string[]; current: number; cancelled: boolean } => {
+  const MAP: Record<RepairStatus, number> = {
+    received: 0,
+    diagnosing: 1,
+    waiting_for_approval: 1,
+    waiting_for_parts: 1,
+    approved: 2,
+    repairing: 2,
+    testing: 2,
+    completed: 3,
+    ready_for_collection: 3,
+    delivered: 4,
+    cancelled: -1,
+  }
+  const current = MAP[status]
+  if (current === undefined) {
+    // Unmapped status: surface it rather than defaulting to "Received", which
+    // would silently claim the repair has barely started.
+    throw new Error(`customerProgress: no customer-facing step for status "${status}"`)
+  }
+  return { steps: CUSTOMER_STEPS, current, cancelled: current === -1 }
+}
