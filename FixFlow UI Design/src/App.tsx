@@ -528,13 +528,46 @@ function CustomerRepairDetails({ jobNumber, jobs }: { jobNumber: string; jobs: R
   </>;
 }
 function Repairs({ navigate, data, technician = false }: { navigate: (p: string) => void; data: RepairRow[]; technician?: boolean }) {
+  const [term, setTerm] = useState("");
+  const [status, setStatus] = useState("all");
+  const [assignee, setAssignee] = useState("all");
+
+  // These three controls filter the table below. A filter that appears to work
+  // but does not is worse than no filter, because the count under it stops
+  // matching what anyone believes they are looking at.
+  const statuses = Array.from(new Set(data.map((r) => r.status))).sort();
+  const techs = Array.from(new Set(data.map((r) => r.tech).filter(Boolean))).sort();
+  const needle = term.trim().toLowerCase();
+
+  const rows = data.filter((r) => {
+    if (status !== "all" && r.status !== status) return false;
+    if (assignee !== "all" && r.tech !== assignee) return false;
+    if (!needle) return true;
+    return [r.id, r.customer, r.device, r.tech].some((v) => v.toLowerCase().includes(needle));
+  });
+
+  const clearFilters = term !== "" || status !== "all" || assignee !== "all";
+
   return <>
     <Card className="filter-card">
-      <div className="filter-search"><Icon name="search"/><input placeholder="Search repair ID, customer or device..."/></div>
-      <button>Status: All <Icon name="chevron" size={12}/></button>{!technician && <button>Technician <Icon name="chevron" size={12}/></button>}<button>Priority <Icon name="chevron" size={12}/></button><Button kind="secondary" icon="filter">More filters</Button>
+      <div className="filter-search"><Icon name="search"/><input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Search repair ID, customer or device..."/></div>
+      <select className="filter-select" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
+        <option value="all">Status: All</option>
+        {statuses.map((v) => <option key={v} value={v}>{v}</option>)}
+      </select>
+      {!technician && <select className="filter-select" value={assignee} onChange={(e) => setAssignee(e.target.value)} aria-label="Filter by technician">
+        <option value="all">All technicians</option>
+        {techs.map((v) => <option key={v} value={v}>{v}</option>)}
+      </select>}
+      {clearFilters && <Button kind="secondary" onClick={() => { setTerm(""); setStatus("all"); setAssignee("all"); }}>Clear filters</Button>}
     </Card>
-    <div className="summary-strip"><div><span>{technician ? "My repairs" : "All repairs"}</span><strong>{data.length}</strong></div><div><span>Active</span><strong>{data.filter((r) => r.status === "In Progress").length}</strong></div><div><span>Waiting</span><strong>{data.filter((r) => r.status.includes("Awaiting")).length}</strong></div><div><span>Ready</span><strong>{data.filter((r) => r.status === "Ready for Pickup").length}</strong></div></div>
-    <Card className="table-card"><RepairTable navigate={navigate} data={data} showFinancial={!technician}/><div className="pagination"><span>Showing {data.length} authorized repairs</span><div><button>Previous</button><button className="active">1</button><button>Next</button></div></div></Card>
+    <div className="summary-strip"><div><span>{technician ? "My repairs" : "All repairs"}</span><strong>{data.length}</strong></div><div><span>Showing</span><strong>{rows.length}</strong></div><div><span>Waiting</span><strong>{rows.filter((r) => r.status.includes("Awaiting")).length}</strong></div><div><span>Ready</span><strong>{rows.filter((r) => r.status === "Ready for Collection").length}</strong></div></div>
+    <Card className="table-card">
+      {rows.length === 0
+        ? <p className="muted" style={{ padding: "18px 4px" }}>No repair matches these filters{clearFilters ? "" : " yet"}.</p>
+        : <RepairTable navigate={navigate} data={rows} showFinancial={!technician}/>}
+      <div className="pagination"><span>Showing {rows.length} of {data.length} authorized repairs</span></div>
+    </Card>
   </>;
 }
 
