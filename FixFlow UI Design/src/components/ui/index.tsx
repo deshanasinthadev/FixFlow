@@ -9,12 +9,54 @@ import { Icon, type IconName } from "./Icon";
 import { useStore } from "../../app/store";
 
 /* ------------------------------------------------------------------ */
+/* Spinner                                                              */
+/* ------------------------------------------------------------------ */
+
+export function Spinner({ size = 20 }: { size?: number }) {
+  return (
+    <svg
+      className="spinner"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeDasharray="31.4 31.4"
+        style={{ animation: "spin 1s linear infinite" }}
+      />
+    </svg>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Textarea                                                             */
+/* ------------------------------------------------------------------ */
+
+export function Textarea({ value, onChange, rows = 3, ...rest }: { value: string; onChange: (value: string) => void; rows?: number } & Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "onChange">) {
+  return (
+    <div className="input textarea">
+      <textarea {...rest} rows={rows} value={value} onChange={(event: React.ChangeEvent<HTMLTextAreaElement>) => onChange(event.target.value)} />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Button                                                              */
 /* ------------------------------------------------------------------ */
 
 export function Button({
   children,
   kind = "primary",
+  variant,
   icon,
   onClick,
   type = "button",
@@ -24,6 +66,7 @@ export function Button({
 }: {
   children: ReactNode;
   kind?: "primary" | "secondary" | "ghost" | "danger";
+  variant?: "primary" | "secondary" | "ghost" | "danger";
   icon?: IconName;
   onClick?: () => void;
   type?: "button" | "submit";
@@ -31,10 +74,11 @@ export function Button({
   full?: boolean;
   size?: "sm" | "md";
 }) {
+  const resolvedKind = variant ?? kind;
   return (
     <button
       type={type}
-      className={`btn ${kind}${size === "sm" ? " sm" : ""}`}
+      className={`btn ${resolvedKind}${size === "sm" ? " sm" : ""}`}
       onClick={onClick}
       disabled={disabled}
       style={full ? { width: "100%" } : undefined}
@@ -180,15 +224,17 @@ export function Field({
   error,
   required,
   children,
+  style,
 }: {
   label: string;
   hint?: string;
   error?: string;
   required?: boolean;
   children: ReactNode;
+  style?: React.CSSProperties;
 }) {
   return (
-    <label className="field">
+    <label className="field" style={style}>
       <span className="field-label">
         {label}
         {required && <em>*</em>}

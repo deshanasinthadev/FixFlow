@@ -1,0 +1,39 @@
+name = "fixflow-api"
+main = "src/index.ts"
+compatibility_date = "2024-10-14"
+compatibility_flags = ["nodejs_compat"]
+
+# Build configuration
+[build]
+command = "npm run build"
+
+# Environment variables (set via wrangler secret put)
+[vars]
+FIREBASE_PROJECT_ID = "your-project-id"
+
+# Secrets (set via wrangler secret put)
+# FIREBASE_CLIENT_EMAIL
+# FIREBASE_PRIVATE_KEY
+# OPENAI_API_KEY (optional)
+# ANTHROPIC_API_KEY (optional)
+
+# KV namespace for caching (optional)
+# [[kv_namespaces]]
+# binding = "CACHE"
+# id = "your-kv-namespace-id"
+
+# D1 database (optional, for SQL needs)
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "fixflow"
+# database_id = "your-database-id"
+
+# Custom domain (configure after deployment)
+# [[routes]]
+# pattern = "api.yourdomain.com/*"
+# zone_name = "yourdomain.com"
+
+# Production environment
+[env.production]
+name = "fixflow-api-prod"
+vars = { FIREBASE_PROJECT_ID = "your-project-id" }

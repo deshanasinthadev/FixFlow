@@ -94,8 +94,8 @@ export const STAFF_NAV: NavGroup[] = [
   {
     label: "AI Assistant",
     items: [
-      { label: "AI Diagnosis", path: "/ai/diagnosis", icon: "brain", permission: "ai.diagnose", planned: true, phase: 4 },
-      { label: "AI Assistant", path: "/ai/assistant", icon: "spark", permission: "ai.diagnose", planned: true, phase: 4 },
+      { label: "AI Assistant", path: "/ai/assistant", icon: "spark", permission: "ai.diagnose" },
+      { label: "AI Diagnosis", path: "/ai/diagnosis", icon: "brain", permission: "ai.diagnose" },
     ],
   },
   {

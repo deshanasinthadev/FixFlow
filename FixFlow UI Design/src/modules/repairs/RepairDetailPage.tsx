@@ -103,8 +103,8 @@ export function RepairDetailPage({ repairId }: { repairId: string }) {
   const notes = events.filter((event) => event.type === "note");
 
   /** Approval gates are enforced by validateTransition inside the service. */
-  const submitStatus = (reason?: string) => {
-    const result = run((draft, actor) =>
+  const submitStatus = async (reason?: string) => {
+    const result = await run(async (draft, actor) =>
       changeStatus(draft, {
         repairId: repair.id,
         to: statusDraft as RepairStatus,
@@ -425,12 +425,12 @@ export function RepairDetailPage({ repairId }: { repairId: string }) {
                 key={item.id}
                 type="button"
                 className="check-label"
-                onClick={() => {
+                onClick={async () => {
                   if (!can("repairs.test")) {
                     pushToast("error", "You cannot update the test checklist.");
                     return;
                   }
-                  const result = run((draft, actor) =>
+                  const result = await run((draft, actor) =>
                     toggleChecklistItem(
                       draft,
                       { repairId: repair.id, itemId: item.id, done: !item.done },
@@ -514,8 +514,8 @@ export function RepairDetailPage({ repairId }: { repairId: string }) {
             <Button kind="secondary" onClick={() => setAssignOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => {
-              const result = run((draft, actor) =>
+            <Button onClick={async () => {
+              const result = await run((draft, actor) =>
                 assignTechnician(draft, repair.id, assignTo || undefined, actor),
               );
               setAssignOpen(false);
@@ -548,12 +548,12 @@ export function RepairDetailPage({ repairId }: { repairId: string }) {
             <Button kind="secondary" onClick={() => setDiagnosisOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => {
+            <Button onClick={async () => {
               if (!recommended || !diagnosisText.trim()) {
                 pushToast("error", "Both the recommended action and findings are required.");
                 return;
               }
-              const result = run((draft, actor) =>
+              const result = await run((draft, actor) =>
                 recordDiagnosis(
                   draft,
                   { repairId: repair.id, findings: diagnosisText, recommended, technicianConfirmed: true },
@@ -602,8 +602,8 @@ export function RepairDetailPage({ repairId }: { repairId: string }) {
             <Button kind="secondary" onClick={() => setPartOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => {
-              const result = run((draft, actor) =>
+            <Button onClick={async () => {
+              const result = await run((draft, actor) =>
                 addRepairPart(draft, { repairId: repair.id, productId: partId, quantity: partQty }, actor),
               );
               setPartOpen(false);
@@ -648,8 +648,8 @@ export function RepairDetailPage({ repairId }: { repairId: string }) {
             <Button kind="secondary" onClick={() => setLabourOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => {
-              const result = run((draft, actor) =>
+            <Button onClick={async () => {
+              const result = await run((draft, actor) =>
                 setLabour(draft, { repairId: repair.id, labourCents: Math.round(Number(labourAmount || 0) * 100) }, actor),
               );
               setLabourOpen(false);
@@ -675,12 +675,12 @@ export function RepairDetailPage({ repairId }: { repairId: string }) {
             <Button kind="secondary" onClick={() => setNoteOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => {
+            <Button onClick={async () => {
               if (!noteText.trim()) {
                 pushToast("error", "Write something first.");
                 return;
               }
-              const result = run((draft, actor) =>
+              const result = await run((draft, actor) =>
                 addRepairNote(
                   draft,
                   {

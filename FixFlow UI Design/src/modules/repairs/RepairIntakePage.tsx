@@ -84,14 +84,14 @@ export function RepairIntakePage() {
     setStep((current) => Math.min(STEPS.length - 1, current + 1));
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!validateStep(0) || !validateStep(1) || !validateStep(2)) {
       setStep(0);
       pushToast("error", "Some required fields are missing.");
       return;
     }
     setSaving(true);
-    const result = run((draft, actor) =>
+    const result = await run(async (draft, actor) =>
       createRepair(
         draft,
         {

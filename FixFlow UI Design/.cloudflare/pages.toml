@@ -1,0 +1,36 @@
+# Cloudflare Pages Configuration
+# This file is used by Cloudflare Pages for build configuration
+
+build_command = "npm run build"
+build_output_directory = "dist"
+root_directory = "FixFlow UI Design"
+
+# Node.js version
+node_version = "20"
+
+# Environment variables (set in Cloudflare Pages dashboard)
+# VITE_FIREBASE_API_KEY
+# VITE_FIREBASE_AUTH_DOMAIN
+# VITE_FIREBASE_PROJECT_ID
+# VITE_FIREBASE_STORAGE_BUCKET
+# VITE_FIREBASE_MESSAGING_SENDER_ID
+# VITE_FIREBASE_APP_ID
+# VITE_API_BASE_URL
+# VITE_USE_EMULATORS
+
+# Headers for security
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+# Cache static assets
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# SPA fallback handled by _redirects file

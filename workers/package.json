@@ -1,0 +1,25 @@
+{
+  "name": "fixflow-workers",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:prod": "wrangler deploy --env production",
+    "tail": "wrangler tail",
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "hono": "^4.13.13",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240903.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.78.0"
+  }
+}

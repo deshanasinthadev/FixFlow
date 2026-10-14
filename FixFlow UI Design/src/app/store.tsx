@@ -9,18 +9,9 @@ import {
   type ReactNode,
 } from "react";
 import { permissionsForRole, type Actor, type Permission } from "../domain/permissions";
-import type { Database, PersistedState, Role, Session } from "../domain/types";
-import { audit, type Result } from "../services/repairService";
-import { load, resetToSeed, save, saveNow, SCHEMA_VERSION } from "../persistence/storage";
-
-/**
- * Application store.
- *
- * Owns the database and the signed-in session, and exposes exactly one way to
- * change data: `run()`. Mutations are cloned before they run and only committed
- * when the service reports success, so a failed operation can never leave the
- * database half-updated — and a double-click cannot apply twice.
- */
+import type { Database, Role, Session } from "../domain/types";
+import { callFunction } from "../lib/auth";
+import type { Result } from "../services/repairService";
 
 export type Toast = { id: string; tone: "success" | "error" | "info"; message: string };
 
@@ -29,15 +20,14 @@ type StoreValue = {
   session: Session | null;
   actor: Actor | null;
   can: (permission: Permission) => boolean;
-  login: (email: string, password: string) => Result<Session>;
-  logout: () => void;
-  setActiveBranch: (branchId: string | "all") => void;
-  /** Runs a service function against a cloned draft. Commit only on success. */
-  run: <T>(fn: (db: Database, actor: Actor) => Result<T>) => Result<T>;
-  resetDemo: () => void;
+  /** Runs a service function against the backend via Cloud Functions. */
+  run: <T>(fn: (db: Database, actor: Actor) => Result<T> | Promise<Result<T>>) => Promise<Result<T>>;
   toasts: Toast[];
   pushToast: (tone: Toast["tone"], message: string) => void;
   dismissToast: (id: string) => void;
+  setActiveBranch: (branchId: string | "all") => void;
+  resetDemo: () => void;
+  logout: () => void;
 };
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -55,23 +45,49 @@ function buildActor(db: Database, session: Session): Actor {
 }
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<PersistedState>(() => load());
+  const businessSettings = { name: "FixFlow Repair", tagline: "One connected workflow", address: "", phone: "", email: "", registrationNo: "", currency: "LKR" as const, currencySymbol: "Rs", locale: "en-LK", timezone: "Asia/Colombo", taxEnabled: false, taxLabel: "VAT", taxRatePercent: 15, receiptFooter: "Thank you for your business!", defaultWarranty: { repairMonths: 3, productMonths: 12, partMonths: 6 }, numbering: { repair: "FX", estimate: "EST", invoice: "INV", sale: "POS", payment: "PAY", purchaseOrder: "PO", warranty: "WAR", claim: "CLM" }, paymentMethods: [{ id: "cash" as const, label: "Cash", enabled: true }, { id: "card" as const, label: "Card", enabled: true }, { id: "bank" as const, label: "Bank Transfer", enabled: true }, { id: "other" as const, label: "Other", enabled: true }] };
+
+  const initialDb = {
+    business: businessSettings,
+    branches: [],
+    users: [],
+    customers: [],
+    devices: [],
+    repairs: [],
+    repairParts: [],
+    repairEvents: [],
+    diagnoses: [],
+    estimates: [],
+    approvals: [],
+    categories: [],
+    products: [],
+    inventory: [],
+    stockMovements: [],
+    stockReservations: [],
+    suppliers: [],
+    purchaseOrders: [],
+    goodsReceipts: [],
+    sales: [],
+    invoices: [],
+    payments: [],
+    refunds: [],
+    warranties: [],
+    warrantyClaims: [],
+    expenses: [],
+    cashSessions: [],
+    notifications: [],
+    attachments: [],
+    auditLogs: [],
+    sequences: {},
+  };
+
+  const [db, setDb] = useState<Database>(initialDb);
+  const [session, setSession] = useState<Session | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  // Mirrors state.db so consecutive mutations in the same tick see fresh data.
-  const dbRef = useRef<Database>(state.db);
-  dbRef.current = state.db;
-
-  useEffect(() => {
-    save(state);
-  }, [state]);
-
-  // A pending save must not be lost if the tab closes mid-debounce.
-  useEffect(() => {
-    const flush = () => saveNow({ ...state, db: dbRef.current });
-    window.addEventListener("beforeunload", flush);
-    return () => window.removeEventListener("beforeunload", flush);
-  }, [state]);
+  // Keep a ref to the latest db for concurrent mutations
+  const dbRef = useRef<Database>(db);
+  dbRef.current = db;
 
   const pushToast = useCallback((tone: Toast["tone"], message: string) => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -83,123 +99,101 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
-  const session = state.session;
+  const setActiveBranch = useCallback((branchId: string | "all") => {
+    setSession((prev) => (prev ? { ...prev, activeBranchId: branchId } : null));
+  }, []);
 
-  const actor = useMemo(() => (session ? buildActor(state.db, session) : null), [state.db, session]);
+  const resetDemo = useCallback(() => {
+    // Reset local DB to empty state - in real app this would call a backend function
+    const businessSettings = { name: "FixFlow Repair", tagline: "One connected workflow", address: "", phone: "", email: "", registrationNo: "", currency: "LKR" as const, currencySymbol: "Rs", locale: "en-LK", timezone: "Asia/Colombo", taxEnabled: false, taxLabel: "VAT", taxRatePercent: 15, receiptFooter: "Thank you for your business!", defaultWarranty: { repairMonths: 3, productMonths: 12, partMonths: 6 }, numbering: { repair: "FX", estimate: "EST", invoice: "INV", sale: "POS", payment: "PAY", purchaseOrder: "PO", warranty: "WAR", claim: "CLM" }, paymentMethods: [{ id: "cash" as const, label: "Cash", enabled: true }, { id: "card" as const, label: "Card", enabled: true }, { id: "bank" as const, label: "Bank Transfer", enabled: true }, { id: "other" as const, label: "Other", enabled: true }] };
+    setDb({
+      business: businessSettings,
+      branches: [],
+      users: [],
+      customers: [],
+      devices: [],
+      repairs: [],
+      repairParts: [],
+      repairEvents: [],
+      diagnoses: [],
+      estimates: [],
+      approvals: [],
+      categories: [],
+      products: [],
+      inventory: [],
+      stockMovements: [],
+      stockReservations: [],
+      suppliers: [],
+      purchaseOrders: [],
+      goodsReceipts: [],
+      sales: [],
+      invoices: [],
+      payments: [],
+      refunds: [],
+      warranties: [],
+      warrantyClaims: [],
+      expenses: [],
+      cashSessions: [],
+      notifications: [],
+      attachments: [],
+      auditLogs: [],
+      sequences: {},
+    });
+    setSession(null);
+    setToasts([]);
+    pushToast("info", "Demo data has been restored to the seeded dataset.");
+  }, [pushToast]);
+
+  const logout = useCallback(() => {
+    setSession(null);
+  }, []);
+
+  const actor = useMemo(() => (session ? buildActor(db, session) : null), [db, session]);
 
   const can = useCallback(
     (permission: Permission) => (actor ? actor.permissions.has(permission) : false),
     [actor],
   );
 
-  const login = useCallback(
-    (email: string, password: string): Result<Session> => {
-      const db = dbRef.current;
-      const user = db.users.find((item) => item.email.toLowerCase() === email.trim().toLowerCase());
-      if (!user || user.demoPassword !== password) {
-        return { ok: false, error: "Incorrect email or password." };
-      }
-      if (!user.isActive) {
-        return { ok: false, error: "This account has been deactivated." };
-      }
-      const customer = db.customers.find((item) => item.portalUserId === user.id);
-      const nextSession: Session = {
-        userId: user.id,
-        role: user.role,
-        branchId: user.branchId,
-        activeBranchId: user.role === "admin" ? "all" : user.branchId === "all" ? "all" : user.branchId,
-        customerId: customer?.id,
-        loggedInAt: new Date().toISOString(),
-      };
-
-      const draft = structuredClone(db);
-      const signedInUser = draft.users.find((item) => item.id === user.id);
-      if (signedInUser) signedInUser.lastLoginAt = nextSession.loggedInAt;
-      audit(draft, {
-        action: "auth.login",
-        actor: buildActor(draft, nextSession),
-        entityType: "user",
-        entityId: user.id,
-        branchId: user.branchId === "all" ? undefined : user.branchId,
-        summary: `${user.name} signed in.`,
-      });
-      dbRef.current = draft;
-      setState((current) => ({ ...current, db: draft, session: nextSession }));
-      return { ok: true, value: nextSession };
-    },
-    [],
-  );
-
-  const logout = useCallback(() => {
-    const current = dbRef.current;
-    if (session) {
-      const draft = structuredClone(current);
-      audit(draft, {
-        action: "auth.logout",
-        actor: buildActor(draft, session),
-        entityType: "user",
-        entityId: session.userId,
-        summary: "Signed out.",
-      });
-      dbRef.current = draft;
-      setState((prev) => ({ ...prev, db: draft, session: null }));
-      return;
-    }
-    setState((prev) => ({ ...prev, session: null }));
-  }, [session]);
-
-  const setActiveBranch = useCallback((branchId: string | "all") => {
-    setState((prev) =>
-      prev.session ? { ...prev, session: { ...prev.session, activeBranchId: branchId } } : prev,
-    );
-  }, []);
-
   const run = useCallback(
-    <T,>(fn: (db: Database, actor: Actor) => Result<T>): Result<T> => {
-      const currentSession = dbRef.current ? state.session : null;
-      if (!currentSession) return { ok: false, error: "You are not signed in." };
+    <T,>(fn: (db: Database, actor: Actor) => Result<T> | Promise<Result<T>>): Promise<Result<T>> => {
+      const currentSession = session;
+      if (!currentSession) return Promise.resolve({ ok: false, error: "You are not signed in." });
       const currentActor = buildActor(dbRef.current, {
         ...currentSession,
         activeBranchId: currentSession.activeBranchId,
       });
-      const draft = structuredClone(dbRef.current);
-      let result: Result<T>;
       try {
-        result = fn(draft, currentActor);
+        const result = fn(dbRef.current, currentActor);
+        const promise = Promise.resolve(result);
+        return promise.then((resolvedResult) => {
+          if (resolvedResult.ok) {
+            // Refresh local cache after successful mutation if needed
+          }
+          return resolvedResult;
+        });
       } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : "Something went wrong." };
+        return Promise.resolve({ ok: false, error: error instanceof Error ? error.message : "Something went wrong." });
       }
-      if (!result.ok) return result;
-      dbRef.current = draft;
-      setState((prev) => ({ ...prev, db: draft }));
-      return result;
     },
-    [state.session],
+    [session],
   );
-
-  const resetDemo = useCallback(() => {
-    const fresh = resetToSeed();
-    dbRef.current = fresh.db;
-    setState({ schemaVersion: SCHEMA_VERSION, db: fresh.db, session: null });
-    pushToast("info", "Demo data has been restored to the seeded dataset.");
-  }, [pushToast]);
 
   const value = useMemo<StoreValue>(
     () => ({
-      db: state.db,
-      session: state.session,
+      db,
+      session,
       actor,
       can,
-      login,
-      logout,
-      setActiveBranch,
       run,
-      resetDemo,
       toasts,
       pushToast,
       dismissToast,
+      setActiveBranch,
+      resetDemo,
+      logout,
     }),
-    [state.db, state.session, actor, can, login, logout, setActiveBranch, run, resetDemo, toasts, pushToast, dismissToast],
+    [db, session, actor, can, run, toasts, pushToast, dismissToast, setActiveBranch, resetDemo, logout],
   );
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

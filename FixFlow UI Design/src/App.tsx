@@ -1,5 +1,6 @@
 import { useEffect } from "react";
-import { StoreProvider, useSession } from "./app/store";
+import { AuthProvider, useSession, useAuthLoading } from "./lib/auth";
+import { initializeFirebase } from "./lib/firebase";
 import { LOGIN_PATH, navigate as go, useRoute, type Route } from "./app/router";
 import { AppShell } from "./components/layout/AppShell";
 import { navGroups } from "./app/navigation";
@@ -11,18 +12,40 @@ import { RepairBoardPage } from "./modules/repairs/RepairBoardPage";
 import { RepairIntakePage } from "./modules/repairs/RepairIntakePage";
 import { RepairDetailPage } from "./modules/repairs/RepairDetailPage";
 import { PortalPage } from "./modules/portal/PortalPage";
+import { AIAssistantPage } from "./modules/ai/AIAssistantPage";
+import { AIDiagnosisPage } from "./modules/ai/AIDiagnosisPage";
+
+// Initialize Firebase on app load
+initializeFirebase();
+
+import { StoreProvider } from "./app/store";
 
 export default function App() {
   return (
-    <StoreProvider>
-      <Router />
-    </StoreProvider>
+    <AuthProvider>
+      <StoreProvider>
+        <Router />
+      </StoreProvider>
+    </AuthProvider>
   );
 }
 
 function Router() {
   const session = useSession();
+  const loading = useAuthLoading();
   const route = useRoute();
+
+  // Show loading while auth state is being determined
+  if (loading) {
+    return (
+      <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <div style={{ textAlign: "center" }}>
+          <div className="spinner" style={{ width: 32, height: 32, margin: "0 auto 16px", borderWidth: 3 }} />
+          <p>Loading FixFlow…</p>
+        </div>
+      </div>
+    );
+  }
 
   // Signed-out users always land on the login screen; signed-in users never stay there.
   useEffect(() => {
@@ -48,6 +71,11 @@ function renderPage(route: Route, role: string) {
       if (route.path === "/repairs/new") return <RepairIntakePage />;
       if (route.path === "/repairs/board") return <RepairBoardPage />;
       if (route.id) return <RepairDetailPage repairId={route.id} />;
+      return <NotFound path={route.path} />;
+
+    case "ai":
+      if (route.path === "/ai/assistant") return <AIAssistantPage />;
+      if (route.path === "/ai/diagnosis") return <AIDiagnosisPage />;
       return <NotFound path={route.path} />;
 
     default:
