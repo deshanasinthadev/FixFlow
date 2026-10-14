@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "../../app/store";
+import { useAuth } from "../../lib/auth";
 import { breadcrumbFor, navGroups } from "../../app/navigation";
 import { navigate as go } from "../../app/router";
 import { inBranchScope, scopeFor } from "../../domain/permissions";
@@ -187,7 +188,8 @@ function NotificationsMenu() {
 /* ------------------------------------------------------------------ */
 
 function ProfileMenu() {
-  const { db, session, actor, logout, pushToast } = useStore();
+  const { db, session, actor, pushToast } = useStore();
+  const { signOut } = useAuth();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -231,7 +233,7 @@ function ProfileMenu() {
               </small>
             </div>
           </div>
-          <button type="button" role="menuitem" className="logout" onClick={() => { logout(); setOpen(false); }}>
+          <button type="button" role="menuitem" className="logout" onClick={() => { signOut(); setOpen(false); }}>
             <Icon name="arrow" />
             Sign out
           </button>

@@ -1,30 +1,61 @@
-import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite'
+import { defineConfig, type HtmlTagDescriptor, type Plugin, type UserConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
 
 import siteConfiguration from './.figma/make/site.json' with { type: 'json' }
 
-
 // Vite config — https://vitejs.dev/config/
-export default defineConfig(({ mode }) => {
-  // .figma/make/deploy-preview passes `--mode development` for cached-preview builds.
+export default defineConfig(({ mode, command }): UserConfig => {
+  const isDev = command === 'serve'
+  const isFigmaPreview = process.env.FIGMA_PUBLIC_URL != null
+  const isCloudflarePages = process.env.CLOUDFLARE_PAGES === 'true'
   const emitSourcemaps = mode === 'development'
 
-  return {
-    base: process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : '/',
-    build: {
-      sourcemap: emitSourcemaps ? 'inline' : false,
-      minify: !emitSourcemaps,
-    },
-    plugins: [
-      react(),
-      tailwindcss(),
+  // Base path configuration
+  // - Figma Make preview: uses FIGMA_PUBLIC_URL
+  // - Cloudflare Pages: serves from root (/)
+  // - Local dev: root (/)
+  let base = '/'
+  if (isFigmaPreview) {
+    base = `${process.env.FIGMA_PUBLIC_URL}/`
+  }
+
+  const plugins: Plugin[] = [
+    ...react(),
+    ...tailwindcss(),
+  ]
+
+  // Figma-specific plugins (only in development, not in production build)
+  if (isDev && !isCloudflarePages) {
+    plugins.push(
       figmaSiteConfiguration(siteConfiguration),
       figmaErrorOverlayReplay(),
       figmaReactRefreshBoundaryFallback(),
       figmaMakeKitPlugin({ storiesGlob: '/src/**/*.stories.{ts,tsx,js,jsx}' }),
-    ],
+    )
+  }
+
+  return {
+    base,
+    build: {
+      outDir: 'dist',
+      sourcemap: emitSourcemaps ? 'inline' : false,
+      minify: !emitSourcemaps,
+      // Ensure proper chunking for Cloudflare Pages
+      rollupOptions: {
+        output: {
+          manualChunks: (id: string) => {
+            if (id.includes('node_modules')) {
+              if (id.includes('react') || id.includes('react-dom')) return 'vendor'
+              if (id.includes('firebase')) return 'firebase'
+            }
+            return null
+          },
+        },
+      },
+    },
+    plugins,
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, './src'),
@@ -34,17 +65,11 @@ export default defineConfig(({ mode }) => {
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
-      // The app is normally opened through a generated preview/proxy hostname
-      // (Figma Make, Codespaces, e2b, ngrok...). Vite 8 rejects any Host header
-      // it does not recognise, so allow those hosts explicitly via
-      // FIGMA_DEV_SERVER_ALLOWED_HOSTS="a.example.com,b.example.com".
       allowedHosts: process.env.FIGMA_DEV_SERVER_ALLOWED_HOSTS
         ? process.env.FIGMA_DEV_SERVER_ALLOWED_HOSTS.split(',').map((host) => host.trim())
         : true,
       watch: {
-        ignored: [
-          '**/.figma/**',
-],
+        ignored: ['**/.figma/**'],
       },
     },
     preview: {
@@ -57,46 +82,34 @@ export default defineConfig(({ mode }) => {
   }
 })
 
+// ============================================================================
+// Figma-specific plugins (only loaded in development)
+// ============================================================================
+
 type FigmaSiteConfiguration = {
   title?: string
   description?: string
   language?: string
-  robots?: {
-    index?: boolean
-  }
-  icons?: {
-    icon?: string
-  }
-  openGraph?: {
-    image?: string
-  }
-  analytics?: {
-    googleAnalyticsId?: string
-  }
-  customScripts?: {
-    headStart?: string
-    headEnd?: string
-    bodyStart?: string
-    bodyEnd?: string
-  }
-  accessibility?: {
-    addBypassLinks?: boolean
-  }
+  robots?: { index?: boolean }
+  icons?: { icon?: string }
+  openGraph?: { image?: string }
+  analytics?: { googleAnalyticsId?: string }
+  customScripts?: { headStart?: string; headEnd?: string; bodyStart?: string; bodyEnd?: string }
+  accessibility?: { addBypassLinks?: boolean }
 }
 
-/** Applies /.figma/make/site.json to the generated document shell. */
 function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
   function sanitizeHtmlValue(value: string | undefined): string {
     return value?.replace(/[^a-zA-Z0-9_-]/g, '') || ''
   }
   function escapeHtmlText(value: string): string {
-    return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    return value.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>')
   }
   function replaceHtmlCommentSlot(html: string, slotName: string, content: string): string {
     return html.replace(`<!-- ${slotName} -->`, content)
   }
 
-  const title = config.title ?? "Figma Make App"
+  const title = config.title ?? 'Figma Make App'
   const description = config.description ?? ''
   const favicon = config.icons?.icon ?? ''
   const socialImage = config.openGraph?.image ?? ''
@@ -113,14 +126,12 @@ function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         if (!robotsTxt || req.url?.split('?')[0] !== '/robots.txt') return next()
-
         res.setHeader('Content-Type', 'text/plain; charset=utf-8')
         res.end(robotsTxt)
       })
     },
     generateBundle() {
       if (!robotsTxt) return
-
       this.emitFile({
         type: 'asset',
         fileName: 'robots.txt',
@@ -166,10 +177,7 @@ function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
           tags.push(
             {
               tag: 'script',
-              attrs: {
-                async: true,
-                src: `https://www.googletagmanager.com/gtag/js?id=${googleAnalyticsId}`,
-              },
+              attrs: { async: true, src: `https://www.googletagmanager.com/gtag/js?id=${googleAnalyticsId}` },
               injectTo: 'head',
             },
             {
@@ -218,28 +226,12 @@ function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
           )
         }
 
-        return {
-          html: result,
-          tags,
-        }
+        return { html: result, tags }
       },
     },
   }
 }
 
-/**
- * Replay the most recent build error to clients that connect after
- * it was first broadcast. Vite buffers an error payload only while
- * no clients are connected and clears the buffer on the first
- * reconnect (see `bufferedMessage` in `createWebSocketServer`), so
- * if the preview iframe reloads after Vite already delivered an
- * error to a live socket, the new socket misses the payload and
- * the overlay stays hidden even though the build is still broken.
- * We intercept `ws.send` to remember the latest error and replay
- * it on every new connection; the cache clears on a successful
- * `update` or `full-reload` so a stale overlay can't survive a
- * fixed build.
- */
 function figmaErrorOverlayReplay(): Plugin {
   return {
     name: 'figma-error-overlay-replay',
@@ -270,18 +262,6 @@ function figmaErrorOverlayReplay(): Plugin {
   }
 }
 
-/**
- * Reload when a module that previously defined a React Refresh boundary stops
- * defining one. This happens when an agent moves a component into a new file
- * and replaces the old module with a re-export:
- *
- *   export { default } from './app/App'
- *
- * Vite otherwise accepts the update using the previous module's HMR boundary,
- * but the re-export-only transform no longer registers a replacement for the
- * mounted component family. React reports a successful refresh while leaving
- * the old tree mounted until the page is reloaded.
- */
 function figmaReactRefreshBoundaryFallback(): Plugin {
   const hadRefreshBoundary = new Map<string, boolean>()
   let sendFullReload: (() => void) | null = null
@@ -310,17 +290,6 @@ function figmaReactRefreshBoundaryFallback(): Plugin {
   }
 }
 
-/**
- * Serves a blank render-target page at /.figma/make/kit.html that
- * the Figma preview script drives directly. The page exposes a
- * registry of every file matching `storiesGlob` on
- * window.__FIGMA__.stories so the design surface can dynamically
- * import + mount each entry into its own grid view.
- *
- * Dev-only: `apply: 'serve'` gates the plugin to `vite dev`. Prod
- * builds (`vite build`) skip it entirely so the route doesn't leak
- * into shipped bundles.
- */
 function figmaMakeKitPlugin(options: { storiesGlob: string | string[] }): Plugin {
   const storiesGlob = Array.isArray(options.storiesGlob) ? options.storiesGlob : [options.storiesGlob]
   const ROUTE = '/.figma/make/kit.html'
@@ -358,7 +327,6 @@ function figmaMakeKitPlugin(options: { storiesGlob: string | string[] }): Plugin
       server.middlewares.use(async (req, res, next) => {
         const url = req.url || ''
         if (url.split('?')[0] !== ROUTE) return next()
-
         try {
           res.setHeader('Content-Type', 'text/html')
           res.end(await server.transformIndexHtml(url, HTML_BOOTSTRAP))

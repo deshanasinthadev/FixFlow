@@ -11,6 +11,7 @@
     "format": "oxfmt"
   },
   "dependencies": {
+    "firebase": "^10.12.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -23,7 +24,7 @@
     "oxfmt": "^0.2.0",
     "postcss": "^8.5.29",
     "tailwindcss": "^4.3.3",
-    "typescript": "^5.7.0",
+    "typescript": "^5.9.3",
     "vite": "^8.0.5"
   }
 }

@@ -1,0 +1,318 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function getClaim(claim) {
+      return request.auth.token[claim];
+    }
+
+    function role() {
+      return getClaim('role');
+    }
+
+    function myBranchId() {
+      return getClaim('branchId');
+    }
+
+    function myUserId() {
+      return request.auth.uid;
+    }
+
+    function isAdmin() {
+      return signedIn() && role() == 'admin';
+    }
+
+    function isManager() {
+      return signedIn() && role() == 'manager';
+    }
+
+    function isTechnician() {
+      return signedIn() && role() == 'technician';
+    }
+
+    function isCashier() {
+      return signedIn() && role() == 'cashier';
+    }
+
+    function isStaff() {
+      return signedIn() && role() in ['admin', 'manager', 'technician', 'cashier'];
+    }
+
+    function isCustomer() {
+      return signedIn() && role() == 'customer';
+    }
+
+    function myCustomerId() {
+      return getClaim('customerId');
+    }
+
+    function myTechnicianId() {
+      return getClaim('technicianId');
+    }
+
+    function inMyBranch(branchId) {
+      return isAdmin() || branchId == myBranchId();
+    }
+
+    function unchanged(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    function isOwnerOrAdmin(userId) {
+      return isAdmin() || myUserId() == userId;
+    }
+
+    // =====================================================================
+    // System collections - clients never write these
+    // =====================================================================
+    match /counters/{counterId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    match /audit_log/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /stock_movements/{movementId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    match /daily_stats/{statId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    match /daily_stats/{statId}/by_branch/{branchId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    match /ai_diagnoses/{diagnosisId} {
+      allow read, write: if false; // callable function only
+    }
+
+    match /settings/{docId} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+    }
+
+    // =====================================================================
+    // Organisation
+    // =====================================================================
+    match /branches/{branchId} {
+      allow read: if isStaff();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if isAdmin()
+        || (isManager() && resource.data.branchId == myBranchId())
+        || myUserId() == userId;
+      allow update: if isAdmin()
+        || (myUserId() == userId && unchanged(['displayName', 'phone', 'avatarUrl']));
+      allow create, delete: if false; // via callable function only
+    }
+
+    match /invites/{inviteId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if false; // function redeems
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // Customers
+    // =====================================================================
+    match /customers/{customerId} {
+      allow read: if isAdmin()
+        || (isStaff() && resource.data.homeBranchId == myBranchId())
+        || (isCustomer() && customerId == myCustomerId());
+      allow create, update: if isStaff() && inMyBranch(request.resource.data.homeBranchId);
+      allow delete: if isAdmin();
+    }
+
+    match /customers/{customerId}/devices/{deviceId} {
+      allow read: if isAdmin()
+        || (isStaff() && get(/databases/$(database)/documents/customers/$(customerId)).data.homeBranchId == myBranchId())
+        || (isCustomer() && customerId == myCustomerId());
+      allow create, update: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // Repairs (core workflow)
+    // =====================================================================
+    match /repairs/{repairId} {
+      allow read: if isAdmin()
+        || (isStaff() && inMyBranch(resource.data.branchId)
+            && (!isTechnician() || resource.data.technicianId == myUserId()))
+        || (isCustomer() && resource.data.customerId == myCustomerId());
+      allow create: if isStaff() && inMyBranch(request.resource.data.branchId);
+      allow update: if isStaff() && inMyBranch(resource.data.branchId);
+      allow delete: if false; // cancel via status change
+
+      // Subcollections
+      match /events/{eventId} {
+        allow read: if isAdmin()
+          || (isStaff() && inMyBranch(get(/databases/$(database)/documents/repairs/$(repairId)).data.branchId))
+          || (isCustomer() && resource.data.visibility == 'customer' && get(/databases/$(database)/documents/repairs/$(repairId)).data.customerId == myCustomerId());
+        allow write: if isStaff() && inMyBranch(get(/databases/$(database)/documents/repairs/$(repairId)).data.branchId);
+      }
+
+      match /parts/{partId} {
+        allow read: if isAdmin()
+          || (isStaff() && inMyBranch(get(/databases/$(database)/documents/repairs/$(repairId)).data.branchId)
+              && (!isTechnician() || get(/databases/$(database)/documents/repairs/$(repairId)).data.technicianId == myUserId()))
+          || (isCustomer() && get(/databases/$(database)/documents/repairs/$(repairId)).data.customerId == myCustomerId());
+        allow write: if isStaff() && inMyBranch(get(/databases/$(database)/documents/repairs/$(repairId)).data.branchId);
+      }
+
+      // Financial subcollection - hidden from technicians
+      match /financials/{docId} {
+        allow read: if isAdmin() || isManager() || isCashier(); // NOT technician
+        allow write: if false;
+      }
+    }
+
+    // =====================================================================
+    // Inventory
+    // =====================================================================
+    match /products/{productId} {
+      allow read: if isStaff();
+      allow create, update: if isAdmin() || isManager();
+      allow delete: if isAdmin();
+
+      match /stock/{branchId} {
+        allow read: if isStaff();
+        allow write: if false; // only stock transaction function
+      }
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if isStaff();
+      allow create, update: if isAdmin() || isManager();
+      allow delete: if isAdmin();
+    }
+
+    match /purchase_orders/{poId} {
+      allow read: if isStaff() && inMyBranch(resource.data.branchId);
+      allow create, update: if isAdmin() || (isManager() && inMyBranch(request.resource.data.branchId));
+      allow delete: if isAdmin();
+    }
+
+    match /goods_receipts/{receiptId} {
+      allow read: if isStaff() && inMyBranch(resource.data.branchId);
+      allow create: if isStaff() && inMyBranch(request.resource.data.branchId);
+      allow update, delete: if false;
+    }
+
+    match /stock_transfers/{transferId} {
+      allow read: if isStaff() && (inMyBranch(resource.data.fromBranchId) || inMyBranch(resource.data.toBranchId));
+      allow create: if isStaff() && inMyBranch(request.resource.data.fromBranchId);
+      allow update: if isStaff() && (inMyBranch(resource.data.fromBranchId) || inMyBranch(resource.data.toBranchId));
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // Sales & POS
+    // =====================================================================
+    match /sales/{saleId} {
+      allow read: if isStaff() && inMyBranch(resource.data.branchId);
+      allow create: if isStaff() && inMyBranch(request.resource.data.branchId);
+      allow update, delete: if false;
+    }
+
+    match /cash_registers/{registerId} {
+      allow read: if isStaff() && inMyBranch(resource.data.branchId);
+      allow create: if isStaff() && inMyBranch(request.resource.data.branchId);
+      allow update: if isStaff() && inMyBranch(resource.data.branchId);
+      allow delete: if false;
+    }
+
+    // =====================================================================
+    // Billing & Finance
+    // =====================================================================
+    match /estimates/{estimateId} {
+      allow read: if isAdmin()
+        || (isStaff() && inMyBranch(resource.data.branchId))
+        || (isCustomer() && resource.data.customerId == myCustomerId());
+      allow create, update: if isStaff() && inMyBranch(request.resource.data.branchId);
+      allow delete: if false;
+    }
+
+    match /invoices/{invoiceId} {
+      allow read: if isAdmin()
+        || (isStaff() && inMyBranch(resource.data.branchId))
+        || (isCustomer() && resource.data.customerId == myCustomerId());
+      allow create, update: if false; // via callable functions only
+      allow delete: if false;
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin()
+        || (isStaff() && inMyBranch(resource.data.branchId))
+        || (isCustomer() && resource.data.customerId == myCustomerId());
+      allow create: if false; // via callable function
+      allow update, delete: if false;
+    }
+
+    match /refunds/{refundId} {
+      allow read: if isAdmin() || (isManager() && inMyBranch(resource.data.branchId));
+      allow create: if isAdmin() || isManager();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isAdmin() || (isManager() && inMyBranch(resource.data.branchId));
+      allow create: if isStaff() && inMyBranch(request.resource.data.branchId);
+      allow update: if isAdmin() || (isManager() && inMyBranch(resource.data.branchId));
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // Warranties
+    // =====================================================================
+    match /warranties/{warrantyId} {
+      allow read: if isAdmin()
+        || (isStaff() && inMyBranch(resource.data.branchId))
+        || (isCustomer() && resource.data.customerId == myCustomerId());
+      allow create, update: if isStaff() && inMyBranch(request.resource.data.branchId);
+      allow delete: if false;
+    }
+
+    match /warranty_claims/{claimId} {
+      allow read: if isAdmin()
+        || (isStaff() && inMyBranch(resource.data.branchId))
+        || (isCustomer() && resource.data.customerId == myCustomerId());
+      allow create: if isCustomer() && request.resource.data.customerId == myCustomerId()
+        || (isStaff() && inMyBranch(request.resource.data.branchId));
+      allow update: if isStaff() && inMyBranch(resource.data.branchId);
+      allow delete: if false;
+    }
+
+    // =====================================================================
+    // Notifications (per-user inbox)
+    // =====================================================================
+    match /notifications/{userId}/items/{notificationId} {
+      allow read: if signedIn() && (myUserId() == userId || isAdmin());
+      allow write: if false; // fan-out by function
+    }
+
+    // =====================================================================
+    // Default deny
+    // =====================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

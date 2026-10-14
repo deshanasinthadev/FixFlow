@@ -215,3 +215,393 @@
 
 @media(max-width:1100px){.form-layout,.detail-grid,.dashboard-grid,.bottom-grid{grid-template-columns:1fr}.filter-card,.form-grid,.portal-totals,.summary-strip{grid-template-columns:repeat(2,1fr)}.repair-hero{grid-template-columns:1fr}}
 @media(max-width:640px){.filter-card,.form-grid,.portal-totals,.summary-strip{grid-template-columns:1fr}.repair-card-button,.activity-list>button{padding:10px}}
+
+/* ==================================================================
+   AI Assistant & AI Diagnosis pages
+   ================================================================== */
+
+.ai-assistant-page {
+  display: grid;
+  gap: 15px;
+}
+
+.ai-assistant-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 15px;
+}
+
+.ai-context-panel {
+  position: sticky;
+  top: 100px;
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+}
+
+.context-form .field {
+  margin-bottom: 12px;
+}
+
+.ai-chat-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 600px;
+}
+
+.chat-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 15px;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow: auto;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-message.assistant {
+  align-items: flex-start;
+}
+
+.chat-message.user {
+  align-items: flex-end;
+}
+
+.chat-message.system {
+  align-items: center;
+}
+
+.message-bubble {
+  max-width: 80%;
+  padding: 12px 15px;
+  border-radius: 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+
+.chat-message.assistant .message-bubble {
+  border-bottom-left-radius: 4px;
+}
+
+.chat-message.user .message-bubble {
+  background: linear-gradient(110deg, #f43f7a, #8b5cf6 55%, #3b82f6);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-message.system .message-bubble {
+  background: #fef3c7;
+  border-color: #fde68a;
+  color: #b45309;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 8.5px;
+}
+
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 8px;
+}
+
+.message-role {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.chat-message.user .message-role {
+  color: white;
+}
+
+.message-time {
+  color: var(--muted);
+  font-size: 7px;
+}
+
+.chat-message.user .message-time {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.message-content {
+  font-size: 9.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.chat-input {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.chat-input .field {
+  margin: 0;
+  flex: 1;
+}
+
+.chat-input .input.textarea {
+  height: 56px;
+  flex: 1;
+}
+
+.ai-diagnosis-page {
+  display: grid;
+  gap: 15px;
+}
+
+.ai-diagnosis-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 15px;
+}
+
+.diagnosis-form .field {
+  margin-bottom: 12px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.diagnosis-result {
+  display: grid;
+  gap: 15px;
+}
+
+.result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.result-section {
+  padding: 15px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.result-section h4 {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.result-section ol {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 9px;
+  line-height: 1.7;
+}
+
+.cause-item {
+  margin-bottom: 10px;
+}
+
+.cause-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.cause-rank {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: #ede9fe;
+  color: #7c3aed;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.inspection-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.step-number {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  font-size: 8px;
+  color: #7c3aed;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.safety {
+  border-left: 3px solid #f43f7a;
+}
+
+.safety-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #e11d48;
+  font-size: 8.5px;
+}
+
+.safety-warning svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.parts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.parts-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 8.5px;
+}
+
+.disclaimer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  background: #ede9fe;
+  border: 1px solid #c4b5fd;
+  border-radius: 10px;
+  font-size: 8.5px;
+  color: #5b21b6;
+}
+
+.disclaimer svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.dark .disclaimer {
+  background: rgba(139, 92, 246, 0.14);
+  border-color: rgba(196, 181, 253, 0.3);
+  color: #c4b5fd;
+}
+
+.result-actions {
+  padding-top: 5px;
+}
+
+.confirm-hint {
+  font-size: 7.5px;
+  color: var(--muted);
+  margin: 8px 0 0;
+  text-align: center;
+}
+
+.diagnosis-history {
+  position: sticky;
+  top: 100px;
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+}
+
+.history-list {
+  display: grid;
+  gap: 8px;
+}
+
+.history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.history-item strong {
+  font-size: 9px;
+}
+
+.history-item small {
+  font-size: 7.5px;
+  color: var(--muted);
+}
+
+.history-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.history-meta .badge {
+  font-size: 7px;
+}
+
+/* Responsive for AI pages */
+@media (max-width: 1100px) {
+  .ai-assistant-layout,
+  .ai-diagnosis-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-context-panel,
+  .diagnosis-history {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .chat-message .message-bubble {
+    max-width: 90%;
+  }
+}

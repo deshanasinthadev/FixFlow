@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useStore } from "../../app/store";
+import { useAuth } from "../../lib/auth";
 import { DEFAULT_PATH } from "../../app/router";
 import { navigate as go } from "../../app/router";
 import { DEMO_ACCOUNTS, DEMO_PASSWORD } from "../../persistence/seedData";
@@ -9,34 +9,31 @@ import { Icon } from "../../components/ui/Icon";
 /**
  * Sign-in screen.
  *
- * NOTE ON SECURITY: this is a local demonstration. Credentials are checked in
- * the browser against the seeded `demoPassword` field, and the session is kept
- * in React state. It is NOT authentication — anyone can read the stored data.
- * The production build must verify credentials server-side and issue a signed
- * session that every request is authorised against.
+ * Uses Firebase Authentication with Cloud Functions backend.
+ * The session is managed via Firebase Auth tokens with custom claims.
  */
 export function LoginPage() {
-  const { login, db } = useStore();
+  const { signIn, loading } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const submit = () => {
+  const submit = async () => {
     setError("");
     if (!email.trim() || !password) {
       setError("Enter both your email address and password.");
       return;
     }
     setBusy(true);
-    const result = login(email, password);
+    const result = await signIn(email, password);
     setBusy(false);
     if (!result.ok) {
-      setError(result.error);
+      setError(result.error || "Sign in failed");
       return;
     }
-    go(result.value.role === "customer" ? "/portal" : DEFAULT_PATH);
+    // The onAuthStateChanged listener in AuthProvider will redirect
   };
 
   return (
@@ -48,8 +45,8 @@ export function LoginPage() {
               <Icon name="tool" size={22} />
             </div>
             <div>
-              <strong>{db.business.name}</strong>
-              <small>{db.business.tagline}</small>
+              <strong>FixFlow Repair</strong>
+              <small>One connected workflow for your repair business</small>
             </div>
           </div>
           <div className="auth-message">
@@ -58,13 +55,11 @@ export function LoginPage() {
             <p>Repairs, inventory, sales and customer care — organized intelligently in one reliable workspace.</p>
           </div>
           <div className="auth-flow">
-            {(
-              [
-                ["Repair intake", "tool"],
-                ["Smart diagnosis", "brain"],
-                ["Payment & warranty", "shield"],
-              ] as const
-            ).map(([label, icon], index) => (
+            {([
+              ["Repair intake", "tool"],
+              ["Smart diagnosis", "brain"],
+              ["Payment & warranty", "shield"],
+            ] as const).map(([label, icon], index) => (
               <div key={label}>
                 <span>
                   <Icon name={icon} />
@@ -79,8 +74,7 @@ export function LoginPage() {
             <span>
               <strong>Local demonstration build</strong>
               <small>
-                Data is stored in this browser under <code>{db ? "fixflow.demo.v1" : ""}</code>. Sign-in is simulated —
-                accounts are not protected in this build.
+                Backend runs on Firebase Emulators. Data is stored in Firestore. Sign-in uses Firebase Auth.
               </small>
             </span>
           </div>
@@ -91,7 +85,7 @@ export function LoginPage() {
         <Card className="login-card">
           <div className="login-heading">
             <span>WELCOME BACK</span>
-            <h2>Sign in to {db.business.name}</h2>
+            <h2>Sign in to FixFlow Repair</h2>
             <p>Use a demonstration account below, or enter credentials manually.</p>
           </div>
 
@@ -120,6 +114,7 @@ export function LoginPage() {
                   value={email}
                   placeholder="name@company.com"
                   onChange={(event) => setEmail(event.target.value)}
+                  disabled={loading || busy}
                 />
               </div>
             </Field>
@@ -133,15 +128,16 @@ export function LoginPage() {
                   value={password}
                   placeholder="Enter your password"
                   onChange={(event) => setPassword(event.target.value)}
+                  disabled={loading || busy}
                 />
-                <button type="button" onClick={() => setShowPassword(!showPassword)}>
+                <button type="button" onClick={() => setShowPassword(!showPassword)} disabled={loading || busy}>
                   {showPassword ? "Hide" : "Show"}
                 </button>
               </div>
             </Field>
 
-            <Button type="submit" full>
-              {busy ? "Signing in…" : "Sign In"}
+            <Button type="submit" full disabled={loading || busy}>
+              {busy ? "Signing in…" : loading ? "Loading…" : "Sign In"}
             </Button>
           </form>
 
@@ -159,6 +155,7 @@ export function LoginPage() {
                   setPassword(DEMO_PASSWORD);
                   setError("");
                 }}
+                disabled={loading || busy}
               >
                 <span>
                   <Icon
@@ -185,7 +182,7 @@ export function LoginPage() {
           </p>
         </Card>
         <p className="auth-footer">
-          Prototype environment · Local browser storage · Not a secure authentication system
+          Prototype environment · Firebase Emulators · Firebase Authentication
         </p>
       </div>
     </div>
